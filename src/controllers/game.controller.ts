@@ -99,6 +99,7 @@ export class GameController {
               version: {type: 'string'},
               originalPrice: {type: 'number', minimum: 0},
               discountPrice: {type: 'number', minimum: 0},
+              publisherId: {type: 'string'},
             },
           },
         },
@@ -106,12 +107,15 @@ export class GameController {
     })
     gameData: Omit<Game, 'id'>,
   ): Promise<Game> {
-    // Only publishers can create games
-    if (currentUser.accountType !== 'publisher') {
-      throw new HttpErrors.Forbidden('Only publishers can create games');
+    // Admins have full access, publishers can create games
+    if (currentUser.accountType !== 'publisher' && currentUser.accountType !== 'admin') {
+      throw new HttpErrors.Forbidden('Only publishers and admins can create games');
     }
 
-    const publisherId = currentUser[securityId];
+    // For publishers, use their ID; for admins, use provided publisherId or their ID
+    const publisherId = currentUser.accountType === 'admin' 
+      ? (gameData as any).publisherId || currentUser[securityId]
+      : currentUser[securityId];
 
     const game = await this.gameRepository.create({
       ...gameData,
@@ -156,9 +160,22 @@ export class GameController {
     })
     gameData: Partial<Game>,
   ): Promise<Game> {
+    // Admins have full access
+    if (currentUser.accountType === 'admin') {
+      // Prevent updating restricted fields
+      delete (gameData as any).id;
+
+      await this.gameRepository.updateById(id, {
+        ...gameData,
+        updatedAt: new Date(),
+      });
+
+      return this.gameRepository.findById(id);
+    }
+
     // Only publishers can update games
     if (currentUser.accountType !== 'publisher') {
-      throw new HttpErrors.Forbidden('Only publishers can update games');
+      throw new HttpErrors.Forbidden('Only publishers and admins can update games');
     }
 
     const publisherId = currentUser[securityId];
@@ -193,9 +210,18 @@ export class GameController {
     @inject(SecurityBindings.USER) currentUser: UserProfile,
     @param.path.string('id') id: string,
   ): Promise<void> {
+    // Admins have full access
+    if (currentUser.accountType === 'admin') {
+      await this.gameRepository.updateById(id, {
+        releaseStatus: 'Delisted',
+        updatedAt: new Date(),
+      });
+      return;
+    }
+
     // Only publishers can delete games
     if (currentUser.accountType !== 'publisher') {
-      throw new HttpErrors.Forbidden('Only publishers can delete games');
+      throw new HttpErrors.Forbidden('Only publishers and admins can delete games');
     }
 
     const publisherId = currentUser[securityId];
