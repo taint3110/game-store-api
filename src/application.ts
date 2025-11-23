@@ -9,6 +9,7 @@ import {MySequence} from './sequence';
 import {AuthenticationComponent} from '@loopback/authentication';
 import {JWTAuthenticationComponent} from '@loopback/authentication-jwt';
 import {MongodbDataSource} from './datasources';
+import {PasswordService, AuthService} from './services';
 
 export {ApplicationConfig};
 
@@ -30,6 +31,10 @@ export class GameStoreApplication extends BootMixin(
     this.component(AuthenticationComponent);
     this.component(JWTAuthenticationComponent);
     this.dataSource(MongodbDataSource);
+
+    // Bind services
+    this.service(PasswordService);
+    this.service(AuthService);
 
     this.projectRoot = __dirname;
     this.bootOptions = {

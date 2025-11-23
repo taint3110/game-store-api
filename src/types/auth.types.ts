@@ -1,4 +1,6 @@
-export interface UserProfile {
+import {UserProfile as LBUserProfile} from '@loopback/security';
+
+export interface UserProfile extends LBUserProfile {
   id: string;
   email: string;
   username?: string;
