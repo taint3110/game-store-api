@@ -90,6 +90,7 @@ export class AuthService {
       id: admin.id!,
       email: admin.email,
       accountType: 'admin',
+      role: admin.role,
     };
   }
 
@@ -101,6 +102,7 @@ export class AuthService {
       email: userProfile.email,
       username: userProfile.username,
       accountType: userProfile.accountType,
+      role: userProfile.role,
     };
 
     const options: SignOptions = {

@@ -5,6 +5,7 @@ export interface UserProfile extends LBUserProfile {
   email: string;
   username?: string;
   accountType: 'customer' | 'publisher' | 'admin';
+  role?: string;
 }
 
 export interface Credentials {

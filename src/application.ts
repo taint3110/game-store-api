@@ -7,9 +7,12 @@ import {ServiceMixin} from '@loopback/service-proxy';
 import path from 'path';
 import {MySequence} from './sequence';
 import {AuthenticationComponent} from '@loopback/authentication';
-import {JWTAuthenticationComponent} from '@loopback/authentication-jwt';
+import {
+  JWTAuthenticationComponent,
+  TokenServiceBindings,
+} from '@loopback/authentication-jwt';
 import {MongodbDataSource} from './datasources';
-import {PasswordService, AuthService} from './services';
+import {PasswordService, AuthService, JWTService} from './services';
 
 export {ApplicationConfig};
 
@@ -31,6 +34,17 @@ export class GameStoreApplication extends BootMixin(
     this.component(AuthenticationComponent);
     this.component(JWTAuthenticationComponent);
     this.dataSource(MongodbDataSource);
+
+    // Configure JWT secret
+    this.bind(TokenServiceBindings.TOKEN_SECRET).to(
+      process.env.JWT_SECRET || 'dev-secret-change-in-production',
+    );
+    this.bind(TokenServiceBindings.TOKEN_EXPIRES_IN).to(
+      process.env.JWT_EXPIRES_IN || '7d',
+    );
+
+    // Bind custom JWT service to override default
+    this.bind(TokenServiceBindings.TOKEN_SERVICE).toClass(JWTService);
 
     // Bind services
     this.service(PasswordService);
