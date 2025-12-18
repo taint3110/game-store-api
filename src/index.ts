@@ -1,36 +1,41 @@
-import {ApplicationConfig, GameStoreApplication} from './application';
+import { ApplicationConfig, GameStoreApplication } from './application';
 import * as dotenv from 'dotenv';
 
 dotenv.config();
 
+// ✅ THÊM 3 DÒNG NÀY
+console.log('====================================');
+console.log('🔑 JWT_SECRET:', process.env.JWT_SECRET);
+console.log('====================================');
+
 export * from './application';
 
 export async function main(options: ApplicationConfig = {}) {
-  const app = new GameStoreApplication(options);
-  await app.boot();
-  await app.start();
+    const app = new GameStoreApplication(options);
+    await app.boot();
+    await app.start();
 
-  const url = app.restServer.url;
-  console.log(`Server is running at ${url}`);
-  console.log(`Try ${url}/ping`);
-  console.log(`API Explorer is available at ${url}/explorer`);
+    const url = app.restServer.url;
+    console.log(`Server is running at ${url}`);
+    console.log(`Try ${url}/ping`);
+    console.log(`API Explorer is available at ${url}/explorer`);
 
-  return app;
+    return app;
 }
 
 if (require.main === module) {
-  const config = {
-    rest: {
-      port: +(process.env.PORT ?? 3000),
-      host: process.env.HOST,
-      gracePeriodForClose: 5000,
-      openApiSpec: {
-        setServersFromRequest: true,
-      },
-    },
-  };
-  main(config).catch(err => {
-    console.error('Cannot start the application.', err);
-    process.exit(1);
-  });
+    const config = {
+        rest: {
+            port: +(process.env.PORT ?? 3000),
+            host: process.env.HOST,
+            gracePeriodForClose: 5000,
+            openApiSpec: {
+                setServersFromRequest: true,
+            },
+        },
+    };
+    main(config).catch((err) => {
+        console.error('Cannot start the application.', err);
+        process.exit(1);
+    });
 }
