@@ -31,6 +31,8 @@
     "migrate": "node ./dist/migrate",
     "preseed": "npm run build",
     "seed": "node ./dist/seed",
+    "preimport:steam-apps": "npm run build",
+    "import:steam-apps": "node ./dist/import-steam-apps",
     "preopenapi-spec": "npm run build",
     "openapi-spec": "node ./dist/openapi-spec",
     "prestart": "npm run rebuild",
@@ -62,6 +64,7 @@
     "@loopback/service-proxy": "^7.0.0",
     "bcryptjs": "^2.4.3",
     "dotenv": "^16.3.1",
+    "csv-parse": "^5.5.6",
     "loopback-connector-mongodb": "^6.2.0",
     "tslib": "^2.0.0"
   },

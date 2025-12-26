@@ -3,6 +3,7 @@ export * from './customer-account.model';
 export * from './publisher-account.model';
 export * from './admin-account.model';
 export * from './game.model';
+export * from './steam-app.model';
 export * from './game-key.model';
 export * from './order.model';
 export * from './order-detail.model';

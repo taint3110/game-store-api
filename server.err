@@ -1,0 +1,2 @@
+(node:8656) [DEP0170] DeprecationWarning: The URL mongodb://lathoaitan148_db_user:RmzVNlzCHXQ348L9@ac-3itxlny-shard-00-02.vgambwc.mongodb.net:27017,ac-3itxlny-shard-00-00.vgambwc.mongodb.net:27017,ac-3itxlny-shard-00-01.vgambwc.mongodb.net:27017/game-store-dev?authSource=admin&replicaSet=atlas-va9m1g-shard-0&retryWrites=true&w=majority&ssl=true is invalid. Future versions of Node.js will throw an error.
+(Use `node --trace-deprecation ...` to show where the warning was created)
