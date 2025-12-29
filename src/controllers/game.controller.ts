@@ -61,6 +61,89 @@ export class GameController {
         });
     }
 
+    @get('/games/paginated', {
+        responses: {
+            '200': {
+                description: 'Paginated array of Game model instances',
+                content: {
+                    'application/json': {
+                        schema: {
+                            type: 'object',
+                            properties: {
+                                data: { type: 'array', items: { 'x-ts-type': Game } },
+                                meta: {
+                                    type: 'object',
+                                    properties: {
+                                        total: { type: 'number' },
+                                        page: { type: 'number' },
+                                        limit: { type: 'number' },
+                                        totalPages: { type: 'number' },
+                                    },
+                                },
+                            },
+                        },
+                    },
+                },
+            },
+        },
+    })
+    async findPaginated(
+        @param.query.string('search') search?: string,
+        @param.query.string('genre') genre?: string,
+        @param.query.string('publisherId') publisherId?: string,
+        @param.query.boolean('onSale') onSale?: boolean,
+        @param.query.number('page') page: number = 1,
+        @param.query.number('limit') limit: number = 20,
+    ): Promise<{ data: Game[]; meta: { total: number; page: number; limit: number; totalPages: number } }> {
+        const where: any = { releaseStatus: 'Released' };
+
+        if (search) {
+            where.name = { regexp: new RegExp(search, 'i') };
+        }
+
+        if (genre) {
+            where.genre = genre;
+        }
+
+        if (publisherId) {
+            where.publisherId = publisherId;
+        }
+
+        if (onSale === true) {
+            where.discountPrice = {
+                exists: true,
+                ne: null,
+                gt: 0,
+            };
+        }
+
+        // Ensure valid pagination values
+        const safePage = Math.max(1, page);
+        const safeLimit = Math.min(Math.max(1, limit), 100); // Max 100 per page
+        const skip = (safePage - 1) * safeLimit;
+
+        const [data, total] = await Promise.all([
+            this.gameRepository.find({
+                where,
+                include: [{ relation: 'publisher' }],
+                limit: safeLimit,
+                skip,
+                order: ['createdAt DESC'],
+            }),
+            this.gameRepository.count(where),
+        ]);
+
+        return {
+            data,
+            meta: {
+                total: total.count,
+                page: safePage,
+                limit: safeLimit,
+                totalPages: Math.ceil(total.count / safeLimit),
+            },
+        };
+    }
+
     @get('/games/{id}', {
         responses: {
             '200': {
