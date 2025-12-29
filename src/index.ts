@@ -1,10 +1,7 @@
 import {ApplicationConfig, GameStoreApplication} from './application';
 import * as dotenv from 'dotenv';
-import dns from 'dns';
 
 dotenv.config();
-// Use public DNS to ensure SRV records (Mongo Atlas) resolve even if local DNS fails
-dns.setServers(['8.8.8.8', '1.1.1.1']);
 
 export * from './application';
 
@@ -22,21 +19,11 @@ export async function main(options: ApplicationConfig = {}) {
 }
 
 if (require.main === module) {
-  const corsOrigins = (process.env.CORS_ORIGINS ?? '')
-    .split(',')
-    .map(s => s.trim())
-    .filter(Boolean);
   const config = {
     rest: {
       port: +(process.env.PORT ?? 3000),
       host: process.env.HOST,
       gracePeriodForClose: 5000,
-      cors: {
-        origin: corsOrigins.length > 0 ? corsOrigins : true,
-        credentials: true,
-        allowedHeaders: ['Content-Type', 'Authorization'],
-        methods: ['GET', 'HEAD', 'PUT', 'PATCH', 'POST', 'DELETE', 'OPTIONS'],
-      },
       openApiSpec: {
         setServersFromRequest: true,
       },
