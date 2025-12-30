@@ -1,5 +1,6 @@
-import {Entity, model, property, belongsTo} from '@loopback/repository';
+import {Entity, model, property, belongsTo, hasMany} from '@loopback/repository';
 import {CustomerAccount} from './customer-account.model';
+import {OrderDetail} from './order-detail.model';
 
 @model({
   settings: {
@@ -17,6 +18,9 @@ export class Order extends Entity {
 
   @belongsTo(() => CustomerAccount)
   customerId: string;
+
+  @hasMany(() => OrderDetail)
+  orderDetails: OrderDetail[];
 
   @property({
     type: 'date',
@@ -79,6 +83,7 @@ export class Order extends Entity {
 
 export interface OrderRelations {
   customer?: CustomerAccount;
+  orderDetails?: OrderDetail[];
 }
 
 export type OrderWithRelations = Order & OrderRelations;

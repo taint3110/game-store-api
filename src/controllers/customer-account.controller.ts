@@ -178,18 +178,24 @@ export class CustomerAccountController {
 
         const orders = await this.orderRepository.find({
             where: { customerId },
-            include: [
-                {
-                    relation: 'orderDetails',
-                    scope: {
-                        include: [{ relation: 'game' }, { relation: 'gameKey' }],
-                    },
-                },
-            ],
             order: ['orderDate DESC'],
         });
 
-        return orders;
+        // Fetch order details for each order
+        const ordersWithDetails = await Promise.all(
+            orders.map(async (order) => {
+                const orderDetails = await this.orderDetailRepository.find({
+                    where: { orderId: order.id },
+                    include: [{ relation: 'game' }, { relation: 'gameKey' }],
+                });
+                return {
+                    ...order,
+                    orderDetails,
+                };
+            }),
+        );
+
+        return ordersWithDetails;
     }
 
     @post('/customers/me/orders', {
@@ -259,7 +265,6 @@ export class CustomerAccountController {
         const gameDetails: Array<{
             game: any;
             price: number;
-            gameKey: any;
         }> = [];
 
         let totalValue = 0;
@@ -283,18 +288,6 @@ export class CustomerAccountController {
                 throw new HttpErrors.Conflict(`You already own the game "${game.name}"`);
             }
 
-            // Find available game key
-            const availableKey = await this.gameKeyRepository.findOne({
-                where: {
-                    gameId: item.gameId,
-                    businessStatus: 'Available',
-                },
-            });
-
-            if (!availableKey) {
-                throw new HttpErrors.BadRequest(`Game "${game.name}" is out of stock`);
-            }
-
             // Calculate price (use discount price if available)
             const price = game.discountPrice || game.originalPrice;
             totalValue += price;
@@ -302,7 +295,6 @@ export class CustomerAccountController {
             gameDetails.push({
                 game,
                 price,
-                gameKey: availableKey,
             });
         }
 
@@ -341,25 +333,26 @@ export class CustomerAccountController {
             }
             // For CreditCard and PayPal, integrate with payment gateway here
 
-            // Create order details and assign game keys
+            // Create order details and generate game keys
             const orderDetails = [];
             for (const detail of gameDetails) {
-                // Reserve game key
-                await this.gameKeyRepository.updateById(detail.gameKey.id, {
+                // Generate and create game key
+                const gameKey = await this.gameKeyRepository.create({
+                    gameId: detail.game.id ?? detail.game._id,
+                    gameVersion: detail.game.version || '1.0.0',
                     businessStatus: 'Sold',
+                    activationStatus: 'NotActivated',
                     ownedByCustomerId: customerId,
                     customerOwnershipDate: new Date(),
-                    updatedAt: new Date(),
+                    publishRegistrationDate: new Date(),
                 });
 
                 // Create order detail
                 const orderDetail = await this.orderDetailRepository.create({
-                    orderId: order.id,
-                    gameId: detail.game.id,
-                    gameKeyId: detail.gameKey.id,
+                    orderId: order.id!,
+                    gameId: detail.game.id ?? detail.game._id,
+                    gameKeyId: gameKey.id!,
                     value: detail.price,
-                    createdAt: new Date(),
-                    updatedAt: new Date(),
                 });
 
                 orderDetails.push(orderDetail);
@@ -371,32 +364,33 @@ export class CustomerAccountController {
                 updatedAt: new Date(),
             });
 
-            // Fetch complete order with relations
-            const completeOrder = await this.orderRepository.findById(order.id, {
-                include: [
-                    {
-                        relation: 'orderDetails',
-                        scope: {
-                            include: [{ relation: 'game' }, { relation: 'gameKey' }],
-                        },
-                    },
-                ],
+            // Fetch complete order
+            const completeOrder = await this.orderRepository.findById(order.id);
+
+            // Fetch order details with game info
+            const completeOrderDetails = await this.orderDetailRepository.find({
+                where: { orderId: order.id },
+                include: [{ relation: 'game' }, { relation: 'gameKey' }],
             });
 
             return {
                 success: true,
                 message: 'Order completed successfully',
-                order: completeOrder,
+                order: {
+                    ...completeOrder,
+                    orderDetails: completeOrderDetails,
+                },
                 transactionId,
             };
-        } catch (error) {
+        } catch (error: any) {
             // Rollback order if payment fails
-            await this.orderRepository.updateById(order.id, {
+            await this.orderRepository.updateById(order.id!, {
                 paymentStatus: 'Failed',
                 updatedAt: new Date(),
             });
 
-            throw new HttpErrors.InternalServerError(`Payment failed: ${error.message}`);
+            console.error('Order creation error:', error);
+            throw new HttpErrors.InternalServerError(`Order failed: ${error.message || 'Unknown error'}`);
         }
     }
 
