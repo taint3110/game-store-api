@@ -5,3 +5,5 @@ export * from './game.controller';
 export * from './steam-app.controller';
 export * from './admin-account.controller';
 export * from './admin-management.controller';
+export * from './promotion.controller';
+export * from './publisher-game.controller';

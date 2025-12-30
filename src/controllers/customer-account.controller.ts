@@ -1,6 +1,6 @@
 import {inject} from '@loopback/core';
 import {repository} from '@loopback/repository';
-import {get, patch, post, requestBody, HttpErrors} from '@loopback/rest';
+import {del, get, param, patch, post, requestBody, HttpErrors} from '@loopback/rest';
 import {authenticate} from '@loopback/authentication';
 import {SecurityBindings, UserProfile, securityId} from '@loopback/security';
 import {randomBytes} from 'crypto';
@@ -28,6 +28,13 @@ export class CustomerAccountController {
     const parsed = typeof value === 'number' ? value : Number(value);
     if (!Number.isFinite(parsed)) return fallback;
     return Math.max(min, Math.min(max, Math.floor(parsed)));
+  }
+
+  private static ensureCustomerAccount(currentUser: UserProfile) {
+    const accountType = (currentUser as any)?.accountType;
+    if (accountType && accountType !== 'customer') {
+      throw new HttpErrors.Forbidden('Only customer accounts can perform this action');
+    }
   }
 
   private static generateKeyCode(): string {
@@ -171,6 +178,405 @@ export class CustomerAccountController {
       password: hashedPassword,
       updatedAt: new Date(),
     });
+  }
+
+  @get('/customers/me/wishlist', {
+    responses: {
+      '200': {
+        description: 'Customer wishlist',
+        content: {'application/json': {schema: {type: 'array', items: {type: 'object'}}}},
+      },
+    },
+  })
+  @authenticate('jwt')
+  async getWishlist(@inject(SecurityBindings.USER) currentUser: UserProfile): Promise<any[]> {
+    CustomerAccountController.ensureCustomerAccount(currentUser);
+    const customerId = currentUser[securityId];
+    const customer = await this.customerAccountRepository.findById(customerId);
+    const wishlist = Array.isArray((customer as any).wishlist) ? (customer as any).wishlist : [];
+    return wishlist;
+  }
+
+  @post('/customers/me/wishlist', {
+    responses: {
+      '200': {
+        description: 'Add an item to wishlist (returns updated wishlist)',
+        content: {'application/json': {schema: {type: 'array', items: {type: 'object'}}}},
+      },
+    },
+  })
+  @authenticate('jwt')
+  async addWishlistItem(
+    @inject(SecurityBindings.USER) currentUser: UserProfile,
+    @requestBody({
+      content: {
+        'application/json': {
+          schema: {
+            type: 'object',
+            required: ['name', 'image'],
+            properties: {
+              id: {type: 'string'},
+              steamAppId: {type: 'number', minimum: 0},
+              slug: {type: 'string'},
+              name: {type: 'string'},
+              image: {type: 'string'},
+              priceLabel: {type: 'string'},
+              originalPriceLabel: {type: 'string'},
+              unitPriceCents: {type: 'number', minimum: 0},
+            },
+          },
+        },
+      },
+    })
+    payload: any,
+  ): Promise<any[]> {
+    CustomerAccountController.ensureCustomerAccount(currentUser);
+    const customerId = currentUser[securityId];
+
+    const steamAppIdRaw =
+      typeof payload?.steamAppId === 'number' && Number.isFinite(payload.steamAppId)
+        ? Math.floor(payload.steamAppId)
+        : undefined;
+    const steamAppId =
+      typeof steamAppIdRaw === 'number' && steamAppIdRaw >= 0 ? steamAppIdRaw : undefined;
+    const slug = CustomerAccountController.safeString(payload?.slug) || undefined;
+    const name =
+      CustomerAccountController.safeString(payload?.name) ||
+      (steamAppId ? `Steam #${steamAppId}` : slug ? `Item ${slug}` : 'Game');
+    const image = CustomerAccountController.safeString(payload?.image);
+    if (!image) throw new HttpErrors.BadRequest('Image is required');
+
+    const idFromPayload = CustomerAccountController.safeString(payload?.id);
+    const id =
+      idFromPayload ||
+      (typeof steamAppId === 'number'
+        ? `steam:${steamAppId}`
+        : slug
+          ? `slug:${slug}`
+          : `item:${name}`);
+
+    const unitPriceCents = CustomerAccountController.clampInt(
+      payload?.unitPriceCents,
+      0,
+      100_000_000,
+      0,
+    );
+
+    const priceLabel = CustomerAccountController.safeString(payload?.priceLabel) || undefined;
+    const originalPriceLabel =
+      CustomerAccountController.safeString(payload?.originalPriceLabel) || undefined;
+
+    const customer = await this.customerAccountRepository.findById(customerId);
+    const current = Array.isArray((customer as any).wishlist) ? (customer as any).wishlist : [];
+
+    const next = [
+      {
+        id,
+        steamAppId,
+        slug,
+        name,
+        image,
+        priceLabel: priceLabel ?? null,
+        originalPriceLabel: originalPriceLabel ?? null,
+        unitPriceCents,
+      },
+      ...current.filter((entry: any) => CustomerAccountController.safeString(entry?.id) !== id),
+    ].slice(0, 200);
+
+    await this.customerAccountRepository.updateById(customerId, {
+      wishlist: next,
+      updatedAt: new Date(),
+    } as any);
+
+    return next;
+  }
+
+  @del('/customers/me/wishlist/{id}', {
+    responses: {
+      '200': {
+        description: 'Remove an item from wishlist (returns updated wishlist)',
+        content: {'application/json': {schema: {type: 'array', items: {type: 'object'}}}},
+      },
+    },
+  })
+  @authenticate('jwt')
+  async removeWishlistItem(
+    @inject(SecurityBindings.USER) currentUser: UserProfile,
+    @param.path.string('id') id: string,
+  ): Promise<any[]> {
+    CustomerAccountController.ensureCustomerAccount(currentUser);
+    const customerId = currentUser[securityId];
+    const safeId = CustomerAccountController.safeString(id);
+    if (!safeId) throw new HttpErrors.BadRequest('id is required');
+
+    const customer = await this.customerAccountRepository.findById(customerId);
+    const current = Array.isArray((customer as any).wishlist) ? (customer as any).wishlist : [];
+    const next = current.filter(
+      (entry: any) => CustomerAccountController.safeString(entry?.id) !== safeId,
+    );
+
+    await this.customerAccountRepository.updateById(customerId, {
+      wishlist: next,
+      updatedAt: new Date(),
+    } as any);
+
+    return next;
+  }
+
+  @del('/customers/me/wishlist', {
+    responses: {
+      '200': {
+        description: 'Clear wishlist (returns updated wishlist)',
+        content: {'application/json': {schema: {type: 'array', items: {type: 'object'}}}},
+      },
+    },
+  })
+  @authenticate('jwt')
+  async clearWishlist(@inject(SecurityBindings.USER) currentUser: UserProfile): Promise<any[]> {
+    CustomerAccountController.ensureCustomerAccount(currentUser);
+    const customerId = currentUser[securityId];
+    const next: any[] = [];
+
+    await this.customerAccountRepository.updateById(customerId, {
+      wishlist: next,
+      updatedAt: new Date(),
+    } as any);
+
+    return next;
+  }
+
+  @get('/customers/me/cart', {
+    responses: {
+      '200': {
+        description: 'Customer cart',
+        content: {'application/json': {schema: {type: 'array', items: {type: 'object'}}}},
+      },
+    },
+  })
+  @authenticate('jwt')
+  async getCart(@inject(SecurityBindings.USER) currentUser: UserProfile): Promise<any[]> {
+    CustomerAccountController.ensureCustomerAccount(currentUser);
+    const customerId = currentUser[securityId];
+    const customer = await this.customerAccountRepository.findById(customerId);
+    const cart = Array.isArray((customer as any).cart) ? (customer as any).cart : [];
+    return cart;
+  }
+
+  @post('/customers/me/cart', {
+    responses: {
+      '200': {
+        description: 'Add/update cart item (returns updated cart)',
+        content: {'application/json': {schema: {type: 'array', items: {type: 'object'}}}},
+      },
+    },
+  })
+  @authenticate('jwt')
+  async upsertCartItem(
+    @inject(SecurityBindings.USER) currentUser: UserProfile,
+    @requestBody({
+      content: {
+        'application/json': {
+          schema: {
+            type: 'object',
+            required: ['item', 'quantity'],
+            properties: {
+              quantity: {type: 'number', minimum: 1},
+              item: {
+                type: 'object',
+                required: ['name', 'image'],
+                properties: {
+                  id: {type: 'string'},
+                  steamAppId: {type: 'number', minimum: 0},
+                  slug: {type: 'string'},
+                  name: {type: 'string'},
+                  image: {type: 'string'},
+                  priceLabel: {type: 'string'},
+                  originalPriceLabel: {type: 'string'},
+                  unitPriceCents: {type: 'number', minimum: 0},
+                },
+              },
+            },
+          },
+        },
+      },
+    })
+    payload: any,
+  ): Promise<any[]> {
+    CustomerAccountController.ensureCustomerAccount(currentUser);
+    const customerId = currentUser[securityId];
+
+    const quantity = CustomerAccountController.clampInt(payload?.quantity, 1, 99, 1);
+    const rawItem = payload?.item ?? {};
+
+    const steamAppIdRaw =
+      typeof rawItem?.steamAppId === 'number' && Number.isFinite(rawItem.steamAppId)
+        ? Math.floor(rawItem.steamAppId)
+        : undefined;
+    const steamAppId =
+      typeof steamAppIdRaw === 'number' && steamAppIdRaw >= 0 ? steamAppIdRaw : undefined;
+    const slug = CustomerAccountController.safeString(rawItem?.slug) || undefined;
+    const name =
+      CustomerAccountController.safeString(rawItem?.name) ||
+      (steamAppId ? `Steam #${steamAppId}` : slug ? `Item ${slug}` : 'Game');
+    const image = CustomerAccountController.safeString(rawItem?.image);
+    if (!image) throw new HttpErrors.BadRequest('Image is required');
+
+    const idFromPayload = CustomerAccountController.safeString(rawItem?.id);
+    const id =
+      idFromPayload ||
+      (typeof steamAppId === 'number'
+        ? `steam:${steamAppId}`
+        : slug
+          ? `slug:${slug}`
+          : `item:${name}`);
+
+    const unitPriceCents = CustomerAccountController.clampInt(
+      rawItem?.unitPriceCents,
+      0,
+      100_000_000,
+      0,
+    );
+
+    const priceLabel = CustomerAccountController.safeString(rawItem?.priceLabel) || undefined;
+    const originalPriceLabel =
+      CustomerAccountController.safeString(rawItem?.originalPriceLabel) || undefined;
+
+    const customer = await this.customerAccountRepository.findById(customerId);
+    const current = Array.isArray((customer as any).cart) ? (customer as any).cart : [];
+
+    const next = [
+      {
+        id,
+        steamAppId,
+        slug,
+        name,
+        image,
+        priceLabel: priceLabel ?? null,
+        originalPriceLabel: originalPriceLabel ?? null,
+        unitPriceCents,
+        quantity,
+      },
+      ...current.filter((entry: any) => CustomerAccountController.safeString(entry?.id) !== id),
+    ].slice(0, 300);
+
+    await this.customerAccountRepository.updateById(customerId, {
+      cart: next,
+      updatedAt: new Date(),
+    } as any);
+
+    return next;
+  }
+
+  @patch('/customers/me/cart/{id}', {
+    responses: {
+      '200': {
+        description: 'Update cart quantity (returns updated cart)',
+        content: {'application/json': {schema: {type: 'array', items: {type: 'object'}}}},
+      },
+    },
+  })
+  @authenticate('jwt')
+  async updateCartItem(
+    @inject(SecurityBindings.USER) currentUser: UserProfile,
+    @param.path.string('id') id: string,
+    @requestBody({
+      content: {
+        'application/json': {
+          schema: {
+            type: 'object',
+            required: ['quantity'],
+            properties: {
+              quantity: {type: 'number', minimum: 0},
+            },
+          },
+        },
+      },
+    })
+    body: {quantity: number},
+  ): Promise<any[]> {
+    CustomerAccountController.ensureCustomerAccount(currentUser);
+    const customerId = currentUser[securityId];
+    const safeId = CustomerAccountController.safeString(id);
+    if (!safeId) throw new HttpErrors.BadRequest('id is required');
+
+    const quantity = CustomerAccountController.clampInt(body?.quantity, 0, 99, 0);
+
+    const customer = await this.customerAccountRepository.findById(customerId);
+    const current = Array.isArray((customer as any).cart) ? (customer as any).cart : [];
+
+    const filtered = current.filter(
+      (entry: any) => CustomerAccountController.safeString(entry?.id) !== safeId,
+    );
+
+    const next =
+      quantity <= 0
+        ? filtered
+        : filtered.concat(
+            current
+              .filter((entry: any) => CustomerAccountController.safeString(entry?.id) === safeId)
+              .map((entry: any) => ({...entry, quantity: quantity})),
+          );
+
+    await this.customerAccountRepository.updateById(customerId, {
+      cart: next,
+      updatedAt: new Date(),
+    } as any);
+
+    return next;
+  }
+
+  @del('/customers/me/cart/{id}', {
+    responses: {
+      '200': {
+        description: 'Remove cart item (returns updated cart)',
+        content: {'application/json': {schema: {type: 'array', items: {type: 'object'}}}},
+      },
+    },
+  })
+  @authenticate('jwt')
+  async removeCartItem(
+    @inject(SecurityBindings.USER) currentUser: UserProfile,
+    @param.path.string('id') id: string,
+  ): Promise<any[]> {
+    CustomerAccountController.ensureCustomerAccount(currentUser);
+    const customerId = currentUser[securityId];
+    const safeId = CustomerAccountController.safeString(id);
+    if (!safeId) throw new HttpErrors.BadRequest('id is required');
+
+    const customer = await this.customerAccountRepository.findById(customerId);
+    const current = Array.isArray((customer as any).cart) ? (customer as any).cart : [];
+    const next = current.filter(
+      (entry: any) => CustomerAccountController.safeString(entry?.id) !== safeId,
+    );
+
+    await this.customerAccountRepository.updateById(customerId, {
+      cart: next,
+      updatedAt: new Date(),
+    } as any);
+
+    return next;
+  }
+
+  @del('/customers/me/cart', {
+    responses: {
+      '200': {
+        description: 'Clear cart (returns updated cart)',
+        content: {'application/json': {schema: {type: 'array', items: {type: 'object'}}}},
+      },
+    },
+  })
+  @authenticate('jwt')
+  async clearCart(@inject(SecurityBindings.USER) currentUser: UserProfile): Promise<any[]> {
+    CustomerAccountController.ensureCustomerAccount(currentUser);
+    const customerId = currentUser[securityId];
+    const next: any[] = [];
+
+    await this.customerAccountRepository.updateById(customerId, {
+      cart: next,
+      updatedAt: new Date(),
+    } as any);
+
+    return next;
   }
 
   @get('/customers/me/orders', {

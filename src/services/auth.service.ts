@@ -94,6 +94,33 @@ export class AuthService {
     };
   }
 
+  async verifyAnyCredentials(email: string, password: string): Promise<UserProfile> {
+    const normalizedEmail = (email ?? '').trim().toLowerCase();
+    if (!normalizedEmail) {
+      throw new HttpErrors.Unauthorized('Invalid credentials');
+    }
+
+    try {
+      return await this.verifyAdminCredentials(normalizedEmail, password);
+    } catch (err) {
+      if (!(err instanceof HttpErrors.Unauthorized)) throw err;
+    }
+
+    try {
+      return await this.verifyPublisherCredentials(normalizedEmail, password);
+    } catch (err) {
+      if (!(err instanceof HttpErrors.Unauthorized)) throw err;
+    }
+
+    try {
+      return await this.verifyCustomerCredentials(normalizedEmail, password);
+    } catch (err) {
+      if (!(err instanceof HttpErrors.Unauthorized)) throw err;
+    }
+
+    throw new HttpErrors.Unauthorized('Invalid credentials');
+  }
+
   generateToken(userProfile: UserProfile): string {
     const secret = process.env.JWT_SECRET || 'dev-secret-change-in-production';
     const expiresIn = (process.env.JWT_EXPIRES_IN || '7d') as SignOptions['expiresIn'];

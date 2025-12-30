@@ -1,6 +1,6 @@
 import {inject} from '@loopback/core';
 import {repository} from '@loopback/repository';
-import {get, patch, del, param, requestBody, HttpErrors} from '@loopback/rest';
+import {get, patch, del, param, post, requestBody, HttpErrors} from '@loopback/rest';
 import {authenticate} from '@loopback/authentication';
 import {SecurityBindings, UserProfile} from '@loopback/security';
 import {
@@ -9,7 +9,9 @@ import {
   OrderRepository,
   GameRepository,
   ReviewRepository,
+  AdminAccountRepository,
 } from '../repositories';
+import {PasswordService} from '../services';
 
 export class AdminManagementController {
   constructor(
@@ -17,13 +19,149 @@ export class AdminManagementController {
     public customerAccountRepository: CustomerAccountRepository,
     @repository(PublisherAccountRepository)
     public publisherAccountRepository: PublisherAccountRepository,
+    @repository(AdminAccountRepository)
+    public adminAccountRepository: AdminAccountRepository,
     @repository(OrderRepository)
     public orderRepository: OrderRepository,
     @repository(GameRepository)
     public gameRepository: GameRepository,
     @repository(ReviewRepository)
     public reviewRepository: ReviewRepository,
+    @inject('services.PasswordService')
+    public passwordService: PasswordService,
   ) {}
+
+  private static ensureAdmin(currentUser: UserProfile) {
+    if ((currentUser as any)?.accountType !== 'admin') {
+      throw new HttpErrors.Forbidden('Admin access required');
+    }
+  }
+
+  // Admin creates a publisher account
+  @post('/admin/publishers', {
+    responses: {
+      '201': {
+        description: 'Publisher account created by admin',
+      },
+    },
+  })
+  @authenticate('jwt')
+  async createPublisher(
+    @inject(SecurityBindings.USER) currentUser: UserProfile,
+    @requestBody({
+      content: {
+        'application/json': {
+          schema: {
+            type: 'object',
+            required: ['publisherName', 'email', 'phoneNumber', 'password', 'contractDate', 'contractDuration'],
+            properties: {
+              publisherName: {type: 'string'},
+              email: {type: 'string', format: 'email'},
+              phoneNumber: {type: 'string'},
+              password: {type: 'string', minLength: 8},
+              socialMedia: {type: 'string'},
+              bankType: {type: 'string'},
+              bankName: {type: 'string'},
+              contractDate: {type: 'string', format: 'date'},
+              contractDuration: {type: 'number', minimum: 1},
+            },
+          },
+        },
+      },
+    })
+    payload: any,
+  ) {
+    AdminManagementController.ensureAdmin(currentUser);
+
+    const email = (payload?.email ?? '').trim().toLowerCase();
+    if (!email) throw new HttpErrors.BadRequest('email is required');
+
+    // Unique across all account types
+    const dupCustomer = await this.customerAccountRepository.findByEmail(email);
+    const dupPublisher = await this.publisherAccountRepository.findByEmail(email);
+    const dupAdmin = await this.adminAccountRepository.findByEmail(email);
+    if (dupCustomer || dupPublisher || dupAdmin) {
+      throw new HttpErrors.Conflict('Email already exists');
+    }
+
+    const hashed = await this.passwordService.hashPassword(payload?.password ?? '');
+
+    const publisher = await this.publisherAccountRepository.create({
+      publisherName: payload.publisherName,
+      email,
+      phoneNumber: payload.phoneNumber,
+      socialMedia: payload.socialMedia,
+      bankType: payload.bankType,
+      bankName: payload.bankName,
+      contractDate: payload.contractDate ? new Date(payload.contractDate) : new Date(),
+      contractDuration: payload.contractDuration ?? 1,
+      activityStatus: 'Active',
+      password: hashed,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    });
+
+    const json = publisher.toJSON() as any;
+    delete json.password;
+    return json;
+  }
+
+  // Admin creates another admin account
+  @post('/admin/admins', {
+    responses: {
+      '201': {
+        description: 'Admin account created by admin',
+      },
+    },
+  })
+  @authenticate('jwt')
+  async createAdmin(
+    @inject(SecurityBindings.USER) currentUser: UserProfile,
+    @requestBody({
+      content: {
+        'application/json': {
+          schema: {
+            type: 'object',
+            required: ['email', 'password'],
+            properties: {
+              email: {type: 'string', format: 'email'},
+              password: {type: 'string', minLength: 8},
+              username: {type: 'string'},
+              role: {type: 'string'},
+            },
+          },
+        },
+      },
+    })
+    payload: any,
+  ) {
+    AdminManagementController.ensureAdmin(currentUser);
+
+    const email = (payload?.email ?? '').trim().toLowerCase();
+    if (!email) throw new HttpErrors.BadRequest('email is required');
+
+    const dupCustomer = await this.customerAccountRepository.findByEmail(email);
+    const dupPublisher = await this.publisherAccountRepository.findByEmail(email);
+    const dupAdmin = await this.adminAccountRepository.findByEmail(email);
+    if (dupCustomer || dupPublisher || dupAdmin) {
+      throw new HttpErrors.Conflict('Email already exists');
+    }
+
+    const hashed = await this.passwordService.hashPassword(payload?.password ?? '');
+
+    const admin = await this.adminAccountRepository.create({
+      email,
+      password: hashed,
+      username: payload.username ?? email,
+      role: payload.role ?? 'manager',
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    } as any);
+
+    const json = admin.toJSON() as any;
+    delete json.password;
+    return json;
+  }
 
   // Customer Management
   @get('/admin/customers', {
@@ -37,9 +175,7 @@ export class AdminManagementController {
   async listCustomers(
     @inject(SecurityBindings.USER) currentUser: UserProfile,
   ): Promise<any[]> {
-    if (currentUser.accountType !== 'admin') {
-      throw new HttpErrors.Forbidden('Admin access required');
-    }
+    AdminManagementController.ensureAdmin(currentUser);
 
     const customers = await this.customerAccountRepository.find({
       include: [{relation: 'gender'}],
@@ -64,9 +200,7 @@ export class AdminManagementController {
     @inject(SecurityBindings.USER) currentUser: UserProfile,
     @param.path.string('id') id: string,
   ): Promise<any> {
-    if (currentUser.accountType !== 'admin') {
-      throw new HttpErrors.Forbidden('Admin access required');
-    }
+    AdminManagementController.ensureAdmin(currentUser);
 
     const customer = await this.customerAccountRepository.findById(id, {
       include: [{relation: 'gender'}],
@@ -106,9 +240,7 @@ export class AdminManagementController {
     })
     updateData: any,
   ): Promise<void> {
-    if (currentUser.accountType !== 'admin') {
-      throw new HttpErrors.Forbidden('Admin access required');
-    }
+    AdminManagementController.ensureAdmin(currentUser);
 
     delete updateData.email;
     delete updateData.password;
