@@ -1,6 +1,6 @@
 import { inject } from '@loopback/core';
 import { repository } from '@loopback/repository';
-import { get, patch, post, requestBody, HttpErrors } from '@loopback/rest';
+import { get, patch, post, del, param, requestBody, HttpErrors } from '@loopback/rest';
 import { authenticate } from '@loopback/authentication';
 import { SecurityBindings, UserProfile, securityId } from '@loopback/security';
 import { CustomerAccount } from '../models';
@@ -446,5 +446,142 @@ export class CustomerAccountController {
                 game: keyJson.game,
             };
         });
+    }
+
+    @get('/customers/me/wishlist', {
+        responses: {
+            '200': {
+                description: 'Customer wishlist with game details',
+                content: {
+                    'application/json': {
+                        schema: {
+                            type: 'array',
+                            items: { type: 'object' },
+                        },
+                    },
+                },
+            },
+        },
+    })
+    @authenticate('jwt')
+    async getWishlist(@inject(SecurityBindings.USER) currentUser: UserProfile): Promise<any[]> {
+        const customerId = currentUser[securityId];
+        const customer = await this.customerAccountRepository.findById(customerId);
+
+        if (!customer.wishlist || customer.wishlist.length === 0) {
+            return [];
+        }
+
+        const games = await this.gameRepository.find({
+            where: {
+                id: { inq: customer.wishlist },
+                releaseStatus: 'Released',
+            },
+            include: [{ relation: 'publisher' }],
+        });
+
+        return games;
+    }
+
+    @post('/customers/me/wishlist/{gameId}', {
+        responses: {
+            '200': {
+                description: 'Game added to wishlist',
+                content: {
+                    'application/json': {
+                        schema: {
+                            type: 'object',
+                            properties: {
+                                success: { type: 'boolean' },
+                                message: { type: 'string' },
+                            },
+                        },
+                    },
+                },
+            },
+        },
+    })
+    @authenticate('jwt')
+    async addToWishlist(
+        @inject(SecurityBindings.USER) currentUser: UserProfile,
+        @param.path.string('gameId') gameId: string,
+    ): Promise<{ success: boolean; message: string }> {
+        const customerId = currentUser[securityId];
+
+        // Verify game exists
+        const game = await this.gameRepository.findById(gameId);
+        if (!game) {
+            throw new HttpErrors.NotFound('Game not found');
+        }
+
+        // Check if customer already owns this game
+        const existingKey = await this.gameKeyRepository.findOne({
+            where: {
+                gameId: gameId,
+                ownedByCustomerId: customerId,
+            },
+        });
+
+        if (existingKey) {
+            throw new HttpErrors.Conflict('You already own this game');
+        }
+
+        const customer = await this.customerAccountRepository.findById(customerId);
+        const wishlist = customer.wishlist || [];
+
+        if (wishlist.includes(gameId)) {
+            throw new HttpErrors.Conflict('Game is already in your wishlist');
+        }
+
+        wishlist.push(gameId);
+
+        await this.customerAccountRepository.updateById(customerId, {
+            wishlist,
+            updatedAt: new Date(),
+        });
+
+        return { success: true, message: `"${game.name}" added to wishlist` };
+    }
+
+    @del('/customers/me/wishlist/{gameId}', {
+        responses: {
+            '200': {
+                description: 'Game removed from wishlist',
+                content: {
+                    'application/json': {
+                        schema: {
+                            type: 'object',
+                            properties: {
+                                success: { type: 'boolean' },
+                                message: { type: 'string' },
+                            },
+                        },
+                    },
+                },
+            },
+        },
+    })
+    @authenticate('jwt')
+    async removeFromWishlist(
+        @inject(SecurityBindings.USER) currentUser: UserProfile,
+        @param.path.string('gameId') gameId: string,
+    ): Promise<{ success: boolean; message: string }> {
+        const customerId = currentUser[securityId];
+        const customer = await this.customerAccountRepository.findById(customerId);
+        const wishlist = customer.wishlist || [];
+
+        const index = wishlist.indexOf(gameId);
+        if (index === -1) {
+            throw new HttpErrors.NotFound('Game is not in your wishlist');
+        }
+
+        wishlist.splice(index, 1);
+
+        await this.customerAccountRepository.updateById(customerId, {
+            wishlist,
+            updatedAt: new Date(),
+        });
+
+        return { success: true, message: 'Game removed from wishlist' };
     }
 }

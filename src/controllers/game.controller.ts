@@ -147,8 +147,8 @@ export class GameController {
     @get('/games/{id}', {
         responses: {
             '200': {
-                description: 'Game model instance',
-                content: { 'application/json': { schema: { 'x-ts-type': Game } } },
+                description: 'Game model instance with reviews',
+                content: { 'application/json': { schema: { type: 'object' } } },
             },
         },
     })
@@ -157,11 +157,30 @@ export class GameController {
             include: [{ relation: 'publisher' }],
         });
 
+        const reviews = await this.reviewRepository.find({
+            where: { gameId: id },
+            include: [{ relation: 'customer' }],
+            order: ['createdAt DESC'],
+            limit: 10,
+        });
+
         const averageRating = await this.reviewRepository.calculateAverageRating(id);
+        const totalReviews = (await this.reviewRepository.count({ gameId: id })).count;
+
+        // Remove password from customer data
+        const sanitizedReviews = reviews.map((review) => {
+            const reviewJson = review.toJSON() as any;
+            if (reviewJson.customer) {
+                delete reviewJson.customer.password;
+            }
+            return reviewJson;
+        });
 
         return {
             ...game.toJSON(),
             averageRating,
+            totalReviews,
+            reviews: sanitizedReviews,
         };
     }
 

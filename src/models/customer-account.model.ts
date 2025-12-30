@@ -102,6 +102,13 @@ export class CustomerAccount extends Entity {
   description?: string;
 
   @property({
+    type: 'array',
+    itemType: 'string',
+    default: [],
+  })
+  wishlist?: string[];
+
+  @property({
     type: 'date',
     default: () => new Date(),
   })
