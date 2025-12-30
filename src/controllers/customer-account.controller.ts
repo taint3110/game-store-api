@@ -277,14 +277,7 @@ export class CustomerAccountController {
             }
 
             // Check if customer already owns this game
-            const existingKey = await this.gameKeyRepository.findOne({
-                where: {
-                    gameId: item.gameId,
-                    ownedByCustomerId: customerId,
-                },
-            });
-
-            if (existingKey) {
+            if (customer.ownedGameIds?.includes(item.gameId)) {
                 throw new HttpErrors.Conflict(`You already own the game "${game.name}"`);
             }
 
@@ -335,10 +328,15 @@ export class CustomerAccountController {
 
             // Create order details and generate game keys
             const orderDetails = [];
+            const purchasedGameIds: string[] = [];
+            
             for (const detail of gameDetails) {
+                const gameId = detail.game.id ?? detail.game._id;
+                purchasedGameIds.push(gameId);
+                
                 // Generate and create game key
                 const gameKey = await this.gameKeyRepository.create({
-                    gameId: detail.game.id ?? detail.game._id,
+                    gameId: gameId,
                     gameVersion: detail.game.version || '1.0.0',
                     businessStatus: 'Sold',
                     activationStatus: 'NotActivated',
@@ -350,13 +348,24 @@ export class CustomerAccountController {
                 // Create order detail
                 const orderDetail = await this.orderDetailRepository.create({
                     orderId: order.id!,
-                    gameId: detail.game.id ?? detail.game._id,
+                    gameId: gameId,
                     gameKeyId: gameKey.id!,
                     value: detail.price,
                 });
 
                 orderDetails.push(orderDetail);
             }
+
+            // Update ownedGameIds and remove from wishlist
+            const currentOwnedGames = customer.ownedGameIds || [];
+            const currentWishlist = customer.wishlist || [];
+            const updatedWishlist = currentWishlist.filter(gameId => !purchasedGameIds.includes(gameId));
+            
+            await this.customerAccountRepository.updateById(customerId, {
+                ownedGameIds: [...currentOwnedGames, ...purchasedGameIds],
+                wishlist: updatedWishlist,
+                updatedAt: new Date(),
+            });
 
             // Update order status to completed
             await this.orderRepository.updateById(order.id, {

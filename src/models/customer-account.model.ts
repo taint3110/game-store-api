@@ -109,6 +109,13 @@ export class CustomerAccount extends Entity {
   wishlist?: string[];
 
   @property({
+    type: 'array',
+    itemType: 'string',
+    default: [],
+  })
+  ownedGameIds?: string[];
+
+  @property({
     type: 'date',
     default: () => new Date(),
   })
