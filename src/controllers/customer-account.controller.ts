@@ -95,22 +95,20 @@ export class CustomerAccountController {
               bankName: {type: 'string'},
               description: {type: 'string'},
             },
-          },
         },
-      },
     })
-    updateData: Partial<CustomerAccount>,
-  ): Promise<Omit<CustomerAccount, 'password'>> {
-    const customerId = currentUser[securityId];
+    @authenticate('jwt')
+    async getProfile(
+        @inject(SecurityBindings.USER) currentUser: UserProfile,
+    ): Promise<Omit<CustomerAccount, 'password'>> {
+        const customerId = currentUser[securityId];
+        const customer = await this.customerAccountRepository.findById(customerId, {
+            include: [{ relation: 'gender' }],
+        });
 
-    // Check if phone number is being changed and already exists
-    if (updateData.phoneNumber) {
-      const existingPhone = await this.customerAccountRepository.findByPhoneNumber(
-        updateData.phoneNumber,
-      );
-      if (existingPhone && existingPhone.id !== customerId) {
-        throw new HttpErrors.Conflict('Phone number already exists');
-      }
+        const customerJson = customer.toJSON() as any;
+        delete customerJson.password;
+        return customerJson;
     }
 
     // Prevent updating restricted fields
@@ -151,23 +149,55 @@ export class CustomerAccountController {
               currentPassword: {type: 'string'},
               newPassword: {type: 'string', minLength: 8},
             },
-          },
         },
-      },
     })
-    passwordData: {currentPassword: string; newPassword: string},
-  ): Promise<void> {
-    const customerId = currentUser[securityId];
-    const customer = await this.customerAccountRepository.findById(customerId);
+    @authenticate('jwt')
+    async updateProfile(
+        @inject(SecurityBindings.USER) currentUser: UserProfile,
+        @requestBody({
+            content: {
+                'application/json': {
+                    schema: {
+                        type: 'object',
+                        properties: {
+                            username: { type: 'string', minLength: 3, maxLength: 50 },
+                            phoneNumber: { type: 'string', pattern: '^(0|\\+84)[0-9]{9,10}$' },
+                            bankType: { type: 'string' },
+                            bankName: { type: 'string' },
+                            description: { type: 'string' },
+                        },
+                    },
+                },
+            },
+        })
+        updateData: Partial<CustomerAccount>,
+    ): Promise<Omit<CustomerAccount, 'password'>> {
+        const customerId = currentUser[securityId];
 
-    // Verify current password
-    const isPasswordValid = await this.passwordService.comparePassword(
-      passwordData.currentPassword,
-      customer.password,
-    );
+        // Check if phone number is being changed and already exists
+        if (updateData.phoneNumber) {
+            const existingPhone = await this.customerAccountRepository.findByPhoneNumber(updateData.phoneNumber);
+            if (existingPhone && existingPhone.id !== customerId) {
+                throw new HttpErrors.Conflict('Phone number already exists');
+            }
+        }
 
-    if (!isPasswordValid) {
-      throw new HttpErrors.Unauthorized('Current password is incorrect');
+        // Prevent updating restricted fields
+        delete (updateData as any).email;
+        delete (updateData as any).password;
+        delete (updateData as any).accountStatus;
+        delete (updateData as any).accountBalance;
+
+        // Update the customer
+        await this.customerAccountRepository.updateById(customerId, {
+            ...updateData,
+            updatedAt: new Date(),
+        });
+
+        const updatedCustomer = await this.customerAccountRepository.findById(customerId);
+        const customerJson = updatedCustomer.toJSON() as any;
+        delete customerJson.password;
+        return customerJson;
     }
 
     // Hash new password
@@ -589,149 +619,338 @@ export class CustomerAccountController {
               type: 'array',
               items: {type: 'object'},
             },
-          },
         },
-      },
-    },
-  })
-  @authenticate('jwt')
-  async getOrderHistory(
-    @inject(SecurityBindings.USER) currentUser: UserProfile,
-  ): Promise<any[]> {
-    const customerId = currentUser[securityId];
-    
-    const orders = await this.orderRepository.find({
-      where: {customerId},
-      include: [
-        {
-          relation: 'orderDetails',
-          scope: {
-            include: [
-              {relation: 'game'},
-              {relation: 'gameKey'},
-            ],
-          },
-        },
-      ],
-      order: ['orderDate DESC'],
-    });
-
-    return orders;
-  }
-
-  @post('/customers/me/orders', {
-    responses: {
-      '201': {
-        description: 'Create customer order',
-        content: {
-          'application/json': {
-            schema: {type: 'object'},
-          },
-        },
-      },
-    },
-  })
-  @authenticate('jwt')
-  async createOrder(
-    @inject(SecurityBindings.USER) currentUser: UserProfile,
-    @requestBody({
-      content: {
-        'application/json': {
-          schema: {
-            type: 'object',
-            required: ['items', 'paymentMethod'],
-            properties: {
-              paymentMethod: {
-                type: 'string',
-                enum: ['Wallet', 'CreditCard', 'PayPal'],
-              },
-              items: {
-                type: 'array',
-                minItems: 1,
-                items: {
-                  type: 'object',
-                  required: ['quantity', 'unitPriceCents', 'name'],
-                  properties: {
-                    steamAppId: {type: 'number', minimum: 0},
-                    slug: {type: 'string'},
-                    name: {type: 'string'},
-                    quantity: {type: 'number', minimum: 1, maximum: 99},
-                    unitPriceCents: {type: 'number', minimum: 0},
-                    image: {type: 'string'},
-                  },
-                },
-              },
-            },
-          },
-        },
-      },
     })
-    payload: {
-      paymentMethod: 'Wallet' | 'CreditCard' | 'PayPal';
-      items: Array<{
-        steamAppId?: number;
-        slug?: string;
-        name: string;
-        quantity: number;
-        unitPriceCents: number;
-        image?: string;
-      }>;
-    },
-  ): Promise<any> {
-    const customerId = currentUser[securityId];
-    const accountType = (currentUser as any)?.accountType;
-    if (accountType && accountType !== 'customer') {
-      throw new HttpErrors.Forbidden('Only customer accounts can create orders');
+    @authenticate('jwt')
+    async changePassword(
+        @inject(SecurityBindings.USER) currentUser: UserProfile,
+        @requestBody({
+            content: {
+                'application/json': {
+                    schema: {
+                        type: 'object',
+                        required: ['currentPassword', 'newPassword'],
+                        properties: {
+                            currentPassword: { type: 'string' },
+                            newPassword: { type: 'string', minLength: 8 },
+                        },
+                    },
+                },
+            },
+        })
+        passwordData: { currentPassword: string; newPassword: string },
+    ): Promise<void> {
+        const customerId = currentUser[securityId];
+        const customer = await this.customerAccountRepository.findById(customerId);
+
+        // Verify current password
+        const isPasswordValid = await this.passwordService.comparePassword(
+            passwordData.currentPassword,
+            customer.password,
+        );
+
+        if (!isPasswordValid) {
+            throw new HttpErrors.Unauthorized('Current password is incorrect');
+        }
+
+        // Hash new password
+        const hashedPassword = await this.passwordService.hashPassword(passwordData.newPassword);
+
+        // Update password
+        await this.customerAccountRepository.updateById(customerId, {
+            password: hashedPassword,
+            updatedAt: new Date(),
+        });
     }
 
-    const paymentMethod = payload.paymentMethod;
-    const itemsInput = Array.isArray(payload.items) ? payload.items : [];
-    if (itemsInput.length === 0) {
-      throw new HttpErrors.BadRequest('Items are required');
+    @get('/customers/me/orders', {
+        responses: {
+            '200': {
+                description: 'Customer order history',
+                content: {
+                    'application/json': {
+                        schema: {
+                            type: 'array',
+                            items: { type: 'object' },
+                        },
+                    },
+                },
+            },
+        },
+    })
+    @authenticate('jwt')
+    async getOrderHistory(@inject(SecurityBindings.USER) currentUser: UserProfile): Promise<any[]> {
+        const customerId = currentUser[securityId];
+
+        const orders = await this.orderRepository.find({
+            where: { customerId },
+            include: [
+                {
+                    relation: 'orderDetails',
+                    scope: {
+                        include: [{ relation: 'game' }, { relation: 'gameKey' }],
+                    },
+                },
+            ],
+            order: ['orderDate DESC'],
+        });
+
+        return orders;
     }
 
-    let totalCents = 0;
-    const items = itemsInput.map(item => {
-      const steamAppIdRaw =
-        typeof item.steamAppId === 'number' && Number.isFinite(item.steamAppId)
-          ? Math.floor(item.steamAppId)
-          : undefined;
-      const steamAppId =
-        typeof steamAppIdRaw === 'number' && steamAppIdRaw >= 0 ? steamAppIdRaw : undefined;
-      const slug = CustomerAccountController.safeString(item.slug) || undefined;
-      const quantity = CustomerAccountController.clampInt(item.quantity, 1, 99, 1);
-      const unitPriceCents = CustomerAccountController.clampInt(
-        item.unitPriceCents,
-        0,
-        100_000_000,
-        0,
-      );
-      const name =
-        CustomerAccountController.safeString(item.name) ||
-        (steamAppId ? `Steam #${steamAppId}` : slug ? `Item ${slug}` : 'Game');
-      const image = CustomerAccountController.safeString(item.image) || undefined;
+    @post('/customers/me/orders', {
+        responses: {
+            '201': {
+                description: 'Order created successfully',
+                content: {
+                    'application/json': {
+                        schema: {
+                            type: 'object',
+                            properties: {
+                                success: { type: 'boolean' },
+                                message: { type: 'string' },
+                                order: { type: 'object' },
+                                transactionId: { type: 'string' },
+                            },
+                        },
+                    },
+                },
+            },
+        },
+    })
+    @authenticate('jwt')
+    async createOrder(
+        @inject(SecurityBindings.USER) currentUser: UserProfile,
+        @requestBody({
+            content: {
+                'application/json': {
+                    schema: {
+                        type: 'object',
+                        required: ['games', 'paymentMethod'],
+                        properties: {
+                            games: {
+                                type: 'array',
+                                items: {
+                                    type: 'object',
+                                    required: ['gameId'],
+                                    properties: {
+                                        gameId: { type: 'string' },
+                                    },
+                                },
+                                minItems: 1,
+                            },
+                            paymentMethod: {
+                                type: 'string',
+                                enum: ['Wallet', 'CreditCard', 'PayPal'],
+                            },
+                        },
+                    },
+                },
+            },
+        })
+        orderData: {
+            games: Array<{ gameId: string }>;
+            paymentMethod: 'Wallet' | 'CreditCard' | 'PayPal';
+        },
+    ): Promise<any> {
+        const customerId = currentUser[securityId];
 
-      const keyCodes = Array.from({length: quantity}, () =>
-        CustomerAccountController.generateKeyCode(),
-      );
+        // Validate customer account
+        const customer = await this.customerAccountRepository.findById(customerId);
+        if (customer.accountStatus !== 'Active') {
+            throw new HttpErrors.Forbidden('Account is not active');
+        }
 
-      totalCents += unitPriceCents * quantity;
+        // Validate games and check availability
+        const gameDetails: Array<{
+            game: any;
+            price: number;
+            gameKey: any;
+        }> = [];
 
-      return {steamAppId, slug, name, quantity, unitPriceCents, image, keyCodes};
-    });
+        let totalValue = 0;
 
-    const order = await this.orderRepository.create({
-      customerId,
-      orderDate: new Date(),
-      totalValue: totalCents / 100,
-      paymentMethod,
-      transactionId: CustomerAccountController.generateTransactionId(),
-      paymentStatus: 'Completed',
-      items,
-      createdAt: new Date(),
-      updatedAt: new Date(),
-    } as any);
+        for (const item of orderData.games) {
+            // Check if game exists and is released
+            const game = await this.gameRepository.findById(item.gameId);
+            if (game.releaseStatus !== 'Released') {
+                throw new HttpErrors.BadRequest(`Game "${game.name}" is not available for purchase`);
+            }
 
-    return order;
-  }
+            // Check if customer already owns this game
+            const existingKey = await this.gameKeyRepository.findOne({
+                where: {
+                    gameId: item.gameId,
+                    ownedByCustomerId: customerId,
+                },
+            });
+
+            if (existingKey) {
+                throw new HttpErrors.Conflict(`You already own the game "${game.name}"`);
+            }
+
+            // Find available game key
+            const availableKey = await this.gameKeyRepository.findOne({
+                where: {
+                    gameId: item.gameId,
+                    businessStatus: 'Available',
+                },
+            });
+
+            if (!availableKey) {
+                throw new HttpErrors.BadRequest(`Game "${game.name}" is out of stock`);
+            }
+
+            // Calculate price (use discount price if available)
+            const price = game.discountPrice || game.originalPrice;
+            totalValue += price;
+
+            gameDetails.push({
+                game,
+                price,
+                gameKey: availableKey,
+            });
+        }
+
+        // Validate payment method
+        if (orderData.paymentMethod === 'Wallet') {
+            if (customer.accountBalance < totalValue) {
+                throw new HttpErrors.BadRequest(
+                    `Insufficient balance. Required: ${totalValue}, Available: ${customer.accountBalance}`,
+                );
+            }
+        }
+
+        // Generate unique transaction ID
+        const transactionId = `TXN-${Date.now()}-${customerId.substring(0, 8)}`;
+
+        // Create order
+        const order = await this.orderRepository.create({
+            customerId,
+            orderDate: new Date(),
+            totalValue,
+            paymentMethod: orderData.paymentMethod,
+            transactionId,
+            paymentStatus: 'Pending',
+            createdAt: new Date(),
+            updatedAt: new Date(),
+        });
+
+        try {
+            // Process payment
+            if (orderData.paymentMethod === 'Wallet') {
+                // Deduct from wallet
+                await this.customerAccountRepository.updateById(customerId, {
+                    accountBalance: customer.accountBalance - totalValue,
+                    updatedAt: new Date(),
+                });
+            }
+            // For CreditCard and PayPal, integrate with payment gateway here
+
+            // Create order details and assign game keys
+            const orderDetails = [];
+            for (const detail of gameDetails) {
+                // Reserve game key
+                await this.gameKeyRepository.updateById(detail.gameKey.id, {
+                    businessStatus: 'Sold',
+                    ownedByCustomerId: customerId,
+                    customerOwnershipDate: new Date(),
+                    updatedAt: new Date(),
+                });
+
+                // Create order detail
+                const orderDetail = await this.orderDetailRepository.create({
+                    orderId: order.id,
+                    gameId: detail.game.id,
+                    gameKeyId: detail.gameKey.id,
+                    value: detail.price,
+                    createdAt: new Date(),
+                    updatedAt: new Date(),
+                });
+
+                orderDetails.push(orderDetail);
+            }
+
+            // Update order status to completed
+            await this.orderRepository.updateById(order.id, {
+                paymentStatus: 'Completed',
+                updatedAt: new Date(),
+            });
+
+            // Fetch complete order with relations
+            const completeOrder = await this.orderRepository.findById(order.id, {
+                include: [
+                    {
+                        relation: 'orderDetails',
+                        scope: {
+                            include: [{ relation: 'game' }, { relation: 'gameKey' }],
+                        },
+                    },
+                ],
+            });
+
+            return {
+                success: true,
+                message: 'Order completed successfully',
+                order: completeOrder,
+                transactionId,
+            };
+        } catch (error) {
+            // Rollback order if payment fails
+            await this.orderRepository.updateById(order.id, {
+                paymentStatus: 'Failed',
+                updatedAt: new Date(),
+            });
+
+            throw new HttpErrors.InternalServerError(`Payment failed: ${error.message}`);
+        }
+    }
+
+    @get('/customers/me/library', {
+        responses: {
+            '200': {
+                description: 'Customer game library (owned games)',
+                content: {
+                    'application/json': {
+                        schema: {
+                            type: 'array',
+                            items: {
+                                type: 'object',
+                                properties: {
+                                    gameKey: { type: 'object' },
+                                    game: { type: 'object' },
+                                },
+                            },
+                        },
+                    },
+                },
+            },
+        },
+    })
+    @authenticate('jwt')
+    async getGameLibrary(@inject(SecurityBindings.USER) currentUser: UserProfile): Promise<any[]> {
+        const customerId = currentUser[securityId];
+
+        const gameKeys = await this.gameKeyRepository.find({
+            where: {
+                ownedByCustomerId: customerId,
+                businessStatus: 'Sold',
+            },
+            include: [{ relation: 'game' }],
+            order: ['customerOwnershipDate DESC'],
+        });
+
+        return gameKeys.map((key) => {
+            const keyJson = key.toJSON() as any;
+            return {
+                gameKey: {
+                    id: keyJson.id,
+                    gameVersion: keyJson.gameVersion,
+                    activationStatus: keyJson.activationStatus,
+                    purchaseDate: keyJson.customerOwnershipDate,
+                },
+                game: keyJson.game,
+            };
+        });
+    }
 }
