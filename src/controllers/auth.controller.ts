@@ -1,6 +1,8 @@
 import {inject} from '@loopback/core';
 import {repository} from '@loopback/repository';
 import {post, requestBody, HttpErrors} from '@loopback/rest';
+import {authenticate} from '@loopback/authentication';
+import {SecurityBindings, UserProfile} from '@loopback/security';
 import {CustomerAccount, PublisherAccount} from '../models';
 import {CustomerAccountRepository, PublisherAccountRepository, AdminAccountRepository} from '../repositories';
 import {AuthService, PasswordService} from '../services';
@@ -48,9 +50,13 @@ export class AuthController {
     })
     customerData: Omit<CustomerAccount, 'id'>,
   ): Promise<Omit<CustomerAccount, 'password'>> {
-    // Check for duplicate email
-    const existingEmail = await this.customerAccountRepository.findByEmail(customerData.email);
-    if (existingEmail) {
+    const email = (customerData.email ?? '').trim().toLowerCase();
+
+    // Check for duplicate email across all account types
+    const existingCustomer = await this.customerAccountRepository.findByEmail(email);
+    const existingPublisher = await this.publisherAccountRepository.findByEmail(email);
+    const existingAdmin = await this.adminAccountRepository.findByEmail(email);
+    if (existingCustomer || existingPublisher || existingAdmin) {
       throw new HttpErrors.Conflict('Email already exists');
     }
 
@@ -68,6 +74,7 @@ export class AuthController {
     // Create customer account
     const customer = await this.customerAccountRepository.create({
       ...customerData,
+      email,
       password: hashedPassword,
       accountStatus: 'Active',
       accountBalance: 0,
@@ -128,6 +135,49 @@ export class AuthController {
     };
   }
 
+  @post('/auth/login', {
+    responses: {
+      '200': {
+        description: 'Login successful',
+        content: {
+          'application/json': {
+            schema: {
+              type: 'object',
+              properties: {
+                token: {type: 'string'},
+                user: {type: 'object'},
+              },
+            },
+          },
+        },
+      },
+    },
+  })
+  async loginAny(
+    @requestBody({
+      content: {
+        'application/json': {
+          schema: {
+            type: 'object',
+            required: ['email', 'password'],
+            properties: {
+              email: {type: 'string'},
+              password: {type: 'string'},
+            },
+          },
+        },
+      },
+    })
+    credentials: Credentials,
+  ): Promise<TokenResponse> {
+    const userProfile = await this.authService.verifyAnyCredentials(
+      credentials.email,
+      credentials.password,
+    );
+    const token = this.authService.generateToken(userProfile);
+    return {token, user: userProfile};
+  }
+
   @post('/auth/publisher/register', {
     responses: {
       '201': {
@@ -136,7 +186,9 @@ export class AuthController {
       },
     },
   })
+  @authenticate('jwt')
   async registerPublisher(
+    @inject(SecurityBindings.USER) currentUser: UserProfile,
     @requestBody({
       content: {
         'application/json': {
@@ -167,6 +219,10 @@ export class AuthController {
     })
     publisherData: Omit<PublisherAccount, 'id'>,
   ): Promise<Omit<PublisherAccount, 'password'>> {
+    if ((currentUser as any)?.accountType !== 'admin') {
+      throw new HttpErrors.Forbidden('Only admin accounts can create publishers.');
+    }
+
     // Check for duplicate email across all account types
     const existingCustomer = await this.customerAccountRepository.findByEmail(publisherData.email);
     const existingPublisher = await this.publisherAccountRepository.findByEmail(

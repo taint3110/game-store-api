@@ -101,6 +101,64 @@ export class CustomerAccount extends Entity {
   })
   description?: string;
 
+  @property.array(Object, {
+    jsonSchema: {
+      items: {
+        type: 'object',
+        properties: {
+          id: {type: 'string'},
+          steamAppId: {type: 'number', minimum: 0},
+          slug: {type: 'string'},
+          name: {type: 'string'},
+          image: {type: 'string'},
+          priceLabel: {type: 'string'},
+          originalPriceLabel: {type: 'string'},
+          unitPriceCents: {type: 'number', minimum: 0},
+        },
+      },
+    },
+  })
+  wishlist?: Array<{
+    id: string;
+    steamAppId?: number;
+    slug?: string;
+    name: string;
+    image: string;
+    priceLabel?: string | null;
+    originalPriceLabel?: string | null;
+    unitPriceCents?: number | null;
+  }>;
+
+  @property.array(Object, {
+    jsonSchema: {
+      items: {
+        type: 'object',
+        properties: {
+          id: {type: 'string'},
+          steamAppId: {type: 'number', minimum: 0},
+          slug: {type: 'string'},
+          name: {type: 'string'},
+          image: {type: 'string'},
+          priceLabel: {type: 'string'},
+          originalPriceLabel: {type: 'string'},
+          unitPriceCents: {type: 'number', minimum: 0},
+          quantity: {type: 'number', minimum: 1, maximum: 99},
+        },
+      },
+    },
+  })
+  cart?: Array<{
+    id: string;
+    steamAppId?: number;
+    slug?: string;
+    name: string;
+    image: string;
+    priceLabel?: string | null;
+    originalPriceLabel?: string | null;
+    unitPriceCents?: number | null;
+    quantity: number;
+  }>;
+
   @property({
     type: 'date',
     default: () => new Date(),
