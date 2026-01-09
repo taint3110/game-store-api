@@ -122,12 +122,13 @@ export class AdminManagementController {
         'application/json': {
           schema: {
             type: 'object',
-            required: ['email', 'password'],
+            required: ['email', 'password', 'phoneNumber'],
             properties: {
               email: {type: 'string', format: 'email'},
               password: {type: 'string', minLength: 8},
-              username: {type: 'string'},
-              role: {type: 'string'},
+              phoneNumber: {type: 'string'},
+              role: {type: 'string', enum: ['SuperAdmin', 'Admin', 'Moderator']},
+              genderId: {type: 'string'},
             },
           },
         },
@@ -152,8 +153,9 @@ export class AdminManagementController {
     const admin = await this.adminAccountRepository.create({
       email,
       password: hashed,
-      username: payload.username ?? email,
-      role: payload.role ?? 'manager',
+      phoneNumber: payload.phoneNumber,
+      role: payload.role ?? 'Admin',
+      genderId: payload.genderId,
       createdAt: new Date(),
       updatedAt: new Date(),
     } as any);
