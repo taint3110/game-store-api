@@ -11,9 +11,10 @@ export class PromotionController {
     public promotionRepository: PromotionRepository,
   ) {}
 
-  private ensureAdmin(currentUser: UserProfile) {
-    if ((currentUser as any)?.accountType !== 'admin') {
-      throw new HttpErrors.Forbidden('Admin access required');
+  private ensureAdminOrPublisher(currentUser: UserProfile) {
+    const role = (currentUser as any)?.accountType;
+    if (role !== 'admin' && role !== 'publisher') {
+      throw new HttpErrors.Forbidden('Admin or publisher access required');
     }
   }
 
@@ -26,7 +27,7 @@ export class PromotionController {
   })
   @authenticate('jwt')
   async list(@inject(SecurityBindings.USER) currentUser: UserProfile) {
-    this.ensureAdmin(currentUser);
+    this.ensureAdminOrPublisher(currentUser);
     return this.promotionRepository.find({
       include: [{relation: 'publisher'}],
       order: ['createdAt DESC'],
@@ -45,7 +46,7 @@ export class PromotionController {
     @inject(SecurityBindings.USER) currentUser: UserProfile,
     @param.path.string('id') id: string,
   ) {
-    this.ensureAdmin(currentUser);
+    this.ensureAdminOrPublisher(currentUser);
     return this.promotionRepository.findById(id, {include: [{relation: 'publisher'}]});
   }
 
@@ -94,9 +95,16 @@ export class PromotionController {
     })
     body: any,
   ) {
-    this.ensureAdmin(currentUser);
+    this.ensureAdminOrPublisher(currentUser);
 
     const now = new Date();
+    // If caller is a publisher, force publisherId to their id
+    const role = (currentUser as any)?.accountType;
+    const publisherId = role === 'publisher' ? (currentUser as any)?.id : body.publisherId;
+    if (!publisherId) {
+      throw new HttpErrors.BadRequest('publisherId is required');
+    }
+
     return this.promotionRepository.create({
       promotionName: body.promotionName,
       discountType: body.discountType,
@@ -107,10 +115,9 @@ export class PromotionController {
       endDate: body.endDate ? new Date(body.endDate) : now,
       quantityIssued: body.quantityIssued ?? 0,
       status: body.status,
-      publisherId: body.publisherId,
+      publisherId,
       createdAt: now,
       updatedAt: now,
     } as any);
   }
 }
-
