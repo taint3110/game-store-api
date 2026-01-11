@@ -320,6 +320,28 @@ export class AdminManagementController {
     return publisherJson;
   }
 
+  @get('/admin/publishers/{id}/games', {
+    responses: {
+      '200': {
+        description: 'List all games for a publisher (admin only)',
+      },
+    },
+  })
+  @authenticate('jwt')
+  async listPublisherGames(
+    @inject(SecurityBindings.USER) currentUser: UserProfile,
+    @param.path.string('id') id: string,
+  ) {
+    if (currentUser.accountType !== 'admin') {
+      throw new HttpErrors.Forbidden('Admin access required');
+    }
+
+    return this.gameRepository.find({
+      where: {publisherId: id},
+      order: ['updatedAt DESC'],
+    });
+  }
+
   @patch('/admin/publishers/{id}', {
     responses: {
       '200': {
@@ -423,6 +445,61 @@ export class AdminManagementController {
     if (currentUser.accountType !== 'admin') {
       throw new HttpErrors.Forbidden('Admin access required');
     }
+
+    return this.orderRepository.findById(id, {
+      include: [
+        {relation: 'customer'},
+        {
+          relation: 'orderDetails',
+          scope: {
+            include: [{relation: 'game'}, {relation: 'gameKey'}],
+          },
+        },
+      ],
+    });
+  }
+
+  @patch('/admin/orders/{id}', {
+    responses: {
+      '200': {
+        description: 'Update order payment status',
+      },
+    },
+  })
+  @authenticate('jwt')
+  async updateOrderStatus(
+    @inject(SecurityBindings.USER) currentUser: UserProfile,
+    @param.path.string('id') id: string,
+    @requestBody({
+      content: {
+        'application/json': {
+          schema: {
+            type: 'object',
+            required: ['paymentStatus'],
+            properties: {
+              paymentStatus: {
+                type: 'string',
+                enum: ['Pending', 'Completed', 'Failed', 'Refunded'],
+              },
+            },
+          },
+        },
+      },
+    })
+    body: {paymentStatus: string},
+  ): Promise<any> {
+    AdminManagementController.ensureAdmin(currentUser);
+
+    const paymentStatus = String(body?.paymentStatus ?? '').trim();
+    const allowed = new Set(['Pending', 'Completed', 'Failed', 'Refunded']);
+    if (!allowed.has(paymentStatus)) {
+      throw new HttpErrors.UnprocessableEntity('Invalid paymentStatus');
+    }
+
+    await this.orderRepository.updateById(id, {
+      paymentStatus,
+      updatedAt: new Date(),
+    });
 
     return this.orderRepository.findById(id, {
       include: [

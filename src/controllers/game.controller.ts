@@ -4,12 +4,122 @@ import {get, post, patch, del, param, requestBody, HttpErrors} from '@loopback/r
 import {authenticate} from '@loopback/authentication';
 import {SecurityBindings, UserProfile, securityId} from '@loopback/security';
 import {Game} from '../models';
-import {GameRepository, ReviewRepository} from '../repositories';
+import {GameRepository, PromotionRepository, ReviewRepository} from '../repositories';
+
+type PromotionLike = {
+  id?: string;
+  promotionName: string;
+  discountType: string;
+  applicableScope: string;
+  applicationCondition: string;
+  publisherId: string;
+  scope?: string;
+  gameIds?: string[];
+  status: string;
+  startDate: Date;
+  expirationDate: Date;
+  endDate: Date;
+};
+
+function parseNumericValue(input: unknown): number | null {
+  if (typeof input === 'number' && Number.isFinite(input)) return input;
+  if (typeof input !== 'string') return null;
+  const match = input.match(/-?\d+(\.\d+)?/);
+  if (!match) return null;
+  const value = Number(match[0]);
+  if (!Number.isFinite(value)) return null;
+  return value;
+}
+
+function isPromotionActive(promo: PromotionLike, now: Date) {
+  if (promo.status !== 'Active') return false;
+  const start = promo.startDate ? new Date(promo.startDate) : null;
+  const exp = promo.expirationDate ? new Date(promo.expirationDate) : null;
+  const end = promo.endDate ? new Date(promo.endDate) : null;
+  if (start && now < start) return false;
+  if (exp && now > exp) return false;
+  if (end && now > end) return false;
+  return true;
+}
+
+function promotionAppliesToGame(promo: PromotionLike, game: Game) {
+  if (promo.applicableScope === 'AllGames') return true;
+  if (promo.applicableScope === 'SpecificGames') {
+    if (!Array.isArray(promo.gameIds)) return false;
+    if (!game.id) return false;
+    return promo.gameIds.includes(String(game.id));
+  }
+  if (promo.applicableScope === 'Category') {
+    const category = String(promo.applicationCondition ?? '').trim();
+    if (!category) return false;
+    return String(game.genre ?? '').trim() === category;
+  }
+  return false;
+}
+
+function computePromoPrice(originalPrice: number, promo: PromotionLike): number | null {
+  const raw = parseNumericValue(promo.applicationCondition);
+  if (raw === null) return null;
+
+  if (promo.discountType === 'Percentage') {
+    const percent = Math.max(0, Math.min(100, Math.abs(raw)));
+    const discounted = originalPrice * (1 - percent / 100);
+    return Math.max(0, Math.round(discounted * 100) / 100);
+  }
+
+  if (promo.discountType === 'FixedAmount') {
+    const amount = Math.max(0, Math.abs(raw));
+    const discounted = originalPrice - amount;
+    return Math.max(0, Math.round(discounted * 100) / 100);
+  }
+
+  return null;
+}
+
+function applyPromotionsToGame(game: Game, promos: PromotionLike[], now: Date): Game {
+  const original =
+    typeof game.originalPrice === 'number' && Number.isFinite(game.originalPrice)
+      ? game.originalPrice
+      : 0;
+
+  const existingDiscount =
+    typeof game.discountPrice === 'number' && Number.isFinite(game.discountPrice)
+      ? game.discountPrice
+      : undefined;
+  const existingFinal =
+    typeof existingDiscount === 'number' && existingDiscount > 0 && existingDiscount < original
+      ? existingDiscount
+      : original;
+
+  let bestFinal = existingFinal;
+
+  for (const promo of promos) {
+    if (!isPromotionActive(promo, now)) continue;
+
+    const scope = String((promo as any).scope ?? 'Publisher');
+    if (scope !== 'Store' && String(promo.publisherId) !== String(game.publisherId)) continue;
+    if (!promotionAppliesToGame(promo, game)) continue;
+
+    const promoPrice = computePromoPrice(original, promo);
+    if (typeof promoPrice !== 'number') continue;
+    if (promoPrice < bestFinal) bestFinal = promoPrice;
+  }
+
+  if (bestFinal >= original) {
+    return game;
+  }
+
+  // Return the same game shape but with an effective discountPrice so the frontend
+  // can display original vs discounted (even for "AllGames" promotions).
+  return Object.assign(game, {discountPrice: bestFinal});
+}
 
 export class GameController {
   constructor(
     @repository(GameRepository)
     public gameRepository: GameRepository,
+    @repository(PromotionRepository)
+    public promotionRepository: PromotionRepository,
     @repository(ReviewRepository)
     public reviewRepository: ReviewRepository,
   ) {}
@@ -45,10 +155,28 @@ export class GameController {
       where.publisherId = publisherId;
     }
 
-    return this.gameRepository.find({
+    const games = await this.gameRepository.find({
       where,
       include: [{relation: 'publisher'}],
     });
+
+    if (games.length === 0) return games;
+
+    const now = new Date();
+    const publisherIds = Array.from(new Set(games.map(g => String(g.publisherId)).filter(Boolean)));
+
+    if (publisherIds.length === 0) return games;
+
+    const promos = (await this.promotionRepository.find({
+      where: {
+        status: 'Active',
+        or: [{publisherId: {inq: publisherIds}}, {scope: 'Store'}],
+      } as any,
+    })) as unknown as PromotionLike[];
+
+    if (promos.length === 0) return games;
+
+    return games.map(game => applyPromotionsToGame(game, promos, now));
   }
 
   @get('/games/{id}', {
@@ -66,8 +194,18 @@ export class GameController {
 
     const averageRating = await this.reviewRepository.calculateAverageRating(id);
 
+    const now = new Date();
+    const promos = (await this.promotionRepository.find({
+      where: {
+        status: 'Active',
+        or: [{publisherId: String(game.publisherId)}, {scope: 'Store'}],
+      } as any,
+    })) as unknown as PromotionLike[];
+
+    const gameWithPromo = promos.length ? applyPromotionsToGame(game, promos, now) : game;
+
     return {
-      ...game.toJSON(),
+      ...gameWithPromo.toJSON(),
       averageRating,
     };
   }

@@ -5,7 +5,7 @@ import {authenticate} from '@loopback/authentication';
 import {SecurityBindings, UserProfile, securityId} from '@loopback/security';
 import {randomBytes} from 'crypto';
 import {CustomerAccount} from '../models';
-import {CustomerAccountRepository, OrderRepository} from '../repositories';
+import {CustomerAccountRepository, OrderRepository, PromotionRepository} from '../repositories';
 import {PasswordService} from '../services';
 
 export class CustomerAccountController {
@@ -14,6 +14,8 @@ export class CustomerAccountController {
     public customerAccountRepository: CustomerAccountRepository,
     @repository(OrderRepository)
     public orderRepository: OrderRepository,
+    @repository(PromotionRepository)
+    public promotionRepository: PromotionRepository,
     @inject('services.PasswordService')
     public passwordService: PasswordService,
   ) {}
@@ -48,6 +50,66 @@ export class CustomerAccountController {
 
   private static generateTransactionId(): string {
     return `tx_${Date.now()}_${randomBytes(6).toString('hex')}`;
+  }
+
+  private static parseNumericValue(input: unknown): number | null {
+    if (typeof input === 'number' && Number.isFinite(input)) return input;
+    if (typeof input !== 'string') return null;
+    const match = input.match(/-?\d+(\.\d+)?/);
+    if (!match) return null;
+    const value = Number(match[0]);
+    if (!Number.isFinite(value)) return null;
+    return value;
+  }
+
+  private static isPromotionActive(promo: any, now: Date) {
+    if (!promo) return false;
+    if (String(promo.status) !== 'Active') return false;
+    const start = promo.startDate ? new Date(promo.startDate) : null;
+    const exp = promo.expirationDate ? new Date(promo.expirationDate) : null;
+    const end = promo.endDate ? new Date(promo.endDate) : null;
+    if (start && now < start) return false;
+    if (exp && now > exp) return false;
+    if (end && now > end) return false;
+    return true;
+  }
+
+  private static computePromoDiscountCents(subtotalCents: number, promo: any) {
+    const raw = CustomerAccountController.parseNumericValue(promo?.applicationCondition);
+    if (raw === null) return 0;
+
+    const discountType = String(promo?.discountType ?? '');
+    if (discountType === 'Percentage') {
+      const percent = Math.max(0, Math.min(100, Math.abs(raw)));
+      const discounted = Math.round(subtotalCents * (percent / 100));
+      return Math.max(0, Math.min(subtotalCents, discounted));
+    }
+
+    if (discountType === 'FixedAmount') {
+      const amountUsd = Math.max(0, Math.abs(raw));
+      const amountCents = Math.round(amountUsd * 100);
+      return Math.max(0, Math.min(subtotalCents, amountCents));
+    }
+
+    return 0;
+  }
+
+  private async findActiveStorePromoByCode(code: string) {
+    const safe = CustomerAccountController.safeString(code).trim();
+    if (!safe) return null;
+
+    const escaped = safe.replace(/[.*+?^${}()|[\\]\\\\]/g, '\\\\$&');
+    const regex = new RegExp(`^${escaped}$`, 'i');
+    const promos = await this.promotionRepository.find({
+      where: {
+        scope: 'Store',
+        status: 'Active',
+        promotionName: {regexp: regex},
+      } as any,
+      limit: 1,
+      order: ['createdAt DESC'],
+    });
+    return promos[0] ?? null;
   }
 
   @get('/customers/me', {
@@ -362,6 +424,69 @@ export class CustomerAccountController {
     return cart;
   }
 
+  @post('/customers/me/promotions/preview', {
+    responses: {
+      '200': {
+        description: 'Preview discount for a promo code against current cart',
+        content: {'application/json': {schema: {type: 'object'}}},
+      },
+    },
+  })
+  @authenticate('jwt')
+  async previewPromotion(
+    @inject(SecurityBindings.USER) currentUser: UserProfile,
+    @requestBody({
+      content: {
+        'application/json': {
+          schema: {
+            type: 'object',
+            required: ['code'],
+            properties: {
+              code: {type: 'string'},
+            },
+          },
+        },
+      },
+    })
+    payload: {code: string},
+  ) {
+    CustomerAccountController.ensureCustomerAccount(currentUser);
+    const customerId = currentUser[securityId];
+    const code = CustomerAccountController.safeString(payload?.code);
+    if (!code) throw new HttpErrors.BadRequest('code is required');
+
+    const promo = await this.findActiveStorePromoByCode(code);
+    if (!promo) {
+      throw new HttpErrors.NotFound('Promo code not found.');
+    }
+
+    const now = new Date();
+    if (!CustomerAccountController.isPromotionActive(promo as any, now)) {
+      throw new HttpErrors.UnprocessableEntity('Promo code is not active.');
+    }
+
+    const customer = await this.customerAccountRepository.findById(customerId);
+    const cart = Array.isArray((customer as any).cart) ? (customer as any).cart : [];
+
+    const subtotalCents = cart.reduce((acc: number, line: any) => {
+      const unit = CustomerAccountController.clampInt(line?.unitPriceCents, 0, 100_000_000, 0);
+      const qty = CustomerAccountController.clampInt(line?.quantity, 1, 99, 1);
+      return acc + unit * qty;
+    }, 0);
+
+    const discountCents = CustomerAccountController.computePromoDiscountCents(subtotalCents, promo);
+    const totalCents = Math.max(0, subtotalCents - discountCents);
+
+    return {
+      code: promo.promotionName,
+      discountType: promo.discountType,
+      applicationCondition: promo.applicationCondition,
+      subtotalCents,
+      discountCents,
+      totalCents,
+    };
+  }
+
   @post('/customers/me/cart', {
     responses: {
       '200': {
@@ -645,6 +770,7 @@ export class CustomerAccountController {
                 type: 'string',
                 enum: ['Wallet', 'CreditCard', 'PayPal'],
               },
+              promoCode: {type: 'string'},
               items: {
                 type: 'array',
                 minItems: 1,
@@ -668,6 +794,7 @@ export class CustomerAccountController {
     })
     payload: {
       paymentMethod: 'Wallet' | 'CreditCard' | 'PayPal';
+      promoCode?: string;
       items: Array<{
         steamAppId?: number;
         slug?: string;
@@ -685,6 +812,7 @@ export class CustomerAccountController {
     }
 
     const paymentMethod = payload.paymentMethod;
+    const promoCode = CustomerAccountController.safeString(payload.promoCode) || undefined;
     const itemsInput = Array.isArray(payload.items) ? payload.items : [];
     if (itemsInput.length === 0) {
       throw new HttpErrors.BadRequest('Items are required');
@@ -720,6 +848,19 @@ export class CustomerAccountController {
       return {steamAppId, slug, name, quantity, unitPriceCents, image, keyCodes};
     });
 
+    let promoApplied: any = null;
+    let discountCents = 0;
+
+    if (promoCode) {
+      const promo = await this.findActiveStorePromoByCode(promoCode);
+      const now = new Date();
+      if (promo && CustomerAccountController.isPromotionActive(promo as any, now)) {
+        promoApplied = promo;
+        discountCents = CustomerAccountController.computePromoDiscountCents(totalCents, promo);
+        totalCents = Math.max(0, totalCents - discountCents);
+      }
+    }
+
     const order = await this.orderRepository.create({
       customerId,
       orderDate: new Date(),
@@ -728,6 +869,8 @@ export class CustomerAccountController {
       transactionId: CustomerAccountController.generateTransactionId(),
       paymentStatus: 'Completed',
       items,
+      promoCode: promoApplied ? promoApplied.promotionName : undefined,
+      promoDiscountValue: discountCents > 0 ? discountCents / 100 : undefined,
       createdAt: new Date(),
       updatedAt: new Date(),
     } as any);

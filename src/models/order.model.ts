@@ -73,6 +73,17 @@ export class Order extends Entity {
   })
   updatedAt: Date;
 
+  @property({
+    type: 'string',
+  })
+  promoCode?: string;
+
+  @property({
+    type: 'number',
+    jsonSchema: {minimum: 0},
+  })
+  promoDiscountValue?: number;
+
   @hasMany(() => OrderDetail)
   orderDetails?: OrderDetail[];
 
