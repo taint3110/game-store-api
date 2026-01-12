@@ -44,14 +44,6 @@ export class Game extends Entity {
   videoUrl?: string;
 
   @property({
-    type: 'number',
-    jsonSchema: {
-      minimum: 0,
-    },
-  })
-  steamAppId?: number;
-
-  @property({
     type: 'date',
     required: true,
   })

@@ -1,6 +1,5 @@
-import {Entity, model, property, belongsTo, hasMany} from '@loopback/repository';
+import {Entity, model, property, belongsTo} from '@loopback/repository';
 import {CustomerAccount} from './customer-account.model';
-import {OrderDetail} from './order-detail.model';
 
 @model({
   settings: {

@@ -240,192 +240,298 @@ export class GameController {
               discountPrice: {type: 'number', minimum: 0},
               publisherId: {type: 'string'},
             },
-          },
         },
-      },
     })
-    gameData: Omit<Game, 'id'>,
-  ): Promise<Game> {
-    // Admins have full access, publishers can create games
-    if (currentUser.accountType !== 'publisher' && currentUser.accountType !== 'admin') {
-      throw new HttpErrors.Forbidden('Only publishers and admins can create games');
-    }
+    async findPaginated(
+        @param.query.string('search') search?: string,
+        @param.query.string('genre') genre?: string,
+        @param.query.string('publisherId') publisherId?: string,
+        @param.query.boolean('onSale') onSale?: boolean,
+        @param.query.number('page') page: number = 1,
+        @param.query.number('limit') limit: number = 20,
+    ): Promise<{ data: Game[]; meta: { total: number; page: number; limit: number; totalPages: number } }> {
+        const where: any = { releaseStatus: 'Released' };
 
-    // For publishers, use their ID; for admins, use provided publisherId or their ID
-    const publisherId = currentUser.accountType === 'admin' 
-      ? (gameData as any).publisherId || currentUser[securityId]
-      : currentUser[securityId];
+        if (search) {
+            where.name = { regexp: new RegExp(search, 'i') };
+        }
 
-    const game = await this.gameRepository.create({
-      ...gameData,
-      publisherId,
-      releaseStatus: 'Released',
-    });
+        if (genre) {
+            where.genre = genre;
+        }
 
-    return game;
-  }
+        if (publisherId) {
+            where.publisherId = publisherId;
+        }
 
-  @patch('/games/{id}', {
-    responses: {
-      '200': {
-        description: 'Game PATCH success',
-        content: {'application/json': {schema: {'x-ts-type': Game}}},
-      },
-    },
-  })
-  @authenticate('jwt')
-  async updateById(
-    @inject(SecurityBindings.USER) currentUser: UserProfile,
-    @param.path.string('id') id: string,
-    @requestBody({
-      content: {
-        'application/json': {
-          schema: {
-            type: 'object',
-            properties: {
-              name: {type: 'string'},
-              genre: {type: 'string'},
-              description: {type: 'string'},
-              imageUrl: {type: 'string'},
-              videoUrl: {type: 'string'},
-              steamAppId: {type: 'number', minimum: 0},
-              releaseDate: {type: 'string', format: 'date'},
-              version: {type: 'string'},
-              originalPrice: {type: 'number', minimum: 0},
-              discountPrice: {type: 'number', minimum: 0},
+        if (onSale === true) {
+            where.discountPrice = {
+                exists: true,
+                ne: null,
+                gt: 0,
+            };
+        }
+
+        // Ensure valid pagination values
+        const safePage = Math.max(1, page);
+        const safeLimit = Math.min(Math.max(1, limit), 100); // Max 100 per page
+        const skip = (safePage - 1) * safeLimit;
+
+        const [data, total] = await Promise.all([
+            this.gameRepository.find({
+                where,
+                include: [{ relation: 'publisher' }],
+                limit: safeLimit,
+                skip,
+                order: ['createdAt DESC'],
+            }),
+            this.gameRepository.count(where),
+        ]);
+
+        return {
+            data,
+            meta: {
+                total: total.count,
+                page: safePage,
+                limit: safeLimit,
+                totalPages: Math.ceil(total.count / safeLimit),
             },
-          },
+        };
+    }
+
+    @get('/games/{id}', {
+        responses: {
+            '200': {
+                description: 'Game model instance',
+                content: { 'application/json': { schema: { 'x-ts-type': Game } } },
+            },
         },
-      },
     })
-    gameData: Partial<Game>,
-  ): Promise<Game> {
-    // Admins have full access
-    if (currentUser.accountType === 'admin') {
-      // Prevent updating restricted fields
-      delete (gameData as any).id;
+    async findById(@param.path.string('id') id: string): Promise<any> {
+        const game = await this.gameRepository.findById(id, {
+            include: [{ relation: 'publisher' }],
+        });
 
-      await this.gameRepository.updateById(id, {
-        ...gameData,
-        updatedAt: new Date(),
-      });
+        const averageRating = await this.reviewRepository.calculateAverageRating(id);
 
-      return this.gameRepository.findById(id);
+        return {
+            ...game.toJSON(),
+            averageRating,
+        };
     }
 
-    // Only publishers can update games
-    if (currentUser.accountType !== 'publisher') {
-      throw new HttpErrors.Forbidden('Only publishers and admins can update games');
-    }
-
-    const publisherId = currentUser[securityId];
-    const game = await this.gameRepository.findById(id);
-
-    // Check ownership
-    if (game.publisherId !== publisherId) {
-      throw new HttpErrors.Forbidden('You can only update your own games');
-    }
-
-    // Prevent updating restricted fields
-    delete (gameData as any).id;
-    delete (gameData as any).publisherId;
-
-    await this.gameRepository.updateById(id, {
-      ...gameData,
-      updatedAt: new Date(),
-    });
-
-    return this.gameRepository.findById(id);
-  }
-
-  @del('/games/{id}', {
-    responses: {
-      '204': {
-        description: 'Game DELETE success',
-      },
-    },
-  })
-  @authenticate('jwt')
-  async deleteById(
-    @inject(SecurityBindings.USER) currentUser: UserProfile,
-    @param.path.string('id') id: string,
-  ): Promise<void> {
-    // Admins have full access
-    if (currentUser.accountType === 'admin') {
-      await this.gameRepository.updateById(id, {
-        releaseStatus: 'Delisted',
-        updatedAt: new Date(),
-      });
-      return;
-    }
-
-    // Only publishers can delete games
-    if (currentUser.accountType !== 'publisher') {
-      throw new HttpErrors.Forbidden('Only publishers and admins can delete games');
-    }
-
-    const publisherId = currentUser[securityId];
-    const game = await this.gameRepository.findById(id);
-
-    // Check ownership
-    if (game.publisherId !== publisherId) {
-      throw new HttpErrors.Forbidden('You can only delete your own games');
-    }
-
-    // Soft delete by setting status to Delisted
-    await this.gameRepository.updateById(id, {
-      releaseStatus: 'Delisted',
-      updatedAt: new Date(),
-    });
-  }
-
-  @get('/games/{id}/reviews', {
-    responses: {
-      '200': {
-        description: 'Array of Review model instances for a game',
-        content: {
-          'application/json': {
-            schema: {type: 'object'},
-          },
+    @post('/games', {
+        responses: {
+            '201': {
+                description: 'Game model instance',
+                content: { 'application/json': { schema: { 'x-ts-type': Game } } },
+            },
         },
-      },
-    },
-  })
-  async getReviews(
-    @param.path.string('id') id: string,
-    @param.query.string('sort') sort?: string,
-  ): Promise<any> {
-    const reviews = await this.reviewRepository.find({
-      where: {gameId: id},
-      include: [{relation: 'customer'}],
-    });
+    })
+    @authenticate('jwt')
+    async create(
+        @inject(SecurityBindings.USER) currentUser: UserProfile,
+        @requestBody({
+            content: {
+                'application/json': {
+                    schema: {
+                        type: 'object',
+                        required: ['name', 'genre', 'description', 'releaseDate', 'version', 'originalPrice'],
+                        properties: {
+                            name: { type: 'string' },
+                            genre: { type: 'string' },
+                            description: { type: 'string' },
+                            imageUrl: { type: 'string' },
+                            videoUrl: { type: 'string' },
+                            releaseDate: { type: 'string', format: 'date' },
+                            version: { type: 'string' },
+                            originalPrice: { type: 'number', minimum: 0 },
+                            discountPrice: { type: 'number', minimum: 0 },
+                            publisherId: { type: 'string' },
+                        },
+                    },
+                },
+            },
+        })
+        gameData: Omit<Game, 'id'>,
+    ): Promise<Game> {
+        // Admins have full access, publishers can create games
+        if (currentUser.accountType !== 'publisher' && currentUser.accountType !== 'admin') {
+            throw new HttpErrors.Forbidden('Only publishers and admins can create games');
+        }
 
-    // Sort reviews
-    if (sort === 'date_desc') {
-      reviews.sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime());
-    } else if (sort === 'date_asc') {
-      reviews.sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime());
-    } else if (sort === 'rating_desc') {
-      reviews.sort((a, b) => b.rating - a.rating);
-    } else if (sort === 'rating_asc') {
-      reviews.sort((a, b) => a.rating - b.rating);
+        // For publishers, use their ID; for admins, use provided publisherId or their ID
+        const publisherId =
+            currentUser.accountType === 'admin'
+                ? (gameData as any).publisherId || currentUser[securityId]
+                : currentUser[securityId];
+
+        const game = await this.gameRepository.create({
+            ...gameData,
+            publisherId,
+            releaseStatus: 'Released',
+        });
+
+        return game;
     }
 
-    const averageRating = await this.reviewRepository.calculateAverageRating(id);
+    @patch('/games/{id}', {
+        responses: {
+            '200': {
+                description: 'Game PATCH success',
+                content: { 'application/json': { schema: { 'x-ts-type': Game } } },
+            },
+        },
+    })
+    @authenticate('jwt')
+    async updateById(
+        @inject(SecurityBindings.USER) currentUser: UserProfile,
+        @param.path.string('id') id: string,
+        @requestBody({
+            content: {
+                'application/json': {
+                    schema: {
+                        type: 'object',
+                        properties: {
+                            name: { type: 'string' },
+                            genre: { type: 'string' },
+                            description: { type: 'string' },
+                            imageUrl: { type: 'string' },
+                            videoUrl: { type: 'string' },
+                            releaseDate: { type: 'string', format: 'date' },
+                            version: { type: 'string' },
+                            originalPrice: { type: 'number', minimum: 0 },
+                            discountPrice: { type: 'number', minimum: 0 },
+                        },
+                    },
+                },
+            },
+        })
+        gameData: Partial<Game>,
+    ): Promise<Game> {
+        // Admins have full access
+        if (currentUser.accountType === 'admin') {
+            // Prevent updating restricted fields
+            delete (gameData as any).id;
 
-    // Remove password from customer data
-    const sanitizedReviews = reviews.map(review => {
-      const reviewJson = review.toJSON() as any;
-      if (reviewJson.customer) {
-        delete reviewJson.customer.password;
-      }
-      return reviewJson;
-    });
+            await this.gameRepository.updateById(id, {
+                ...gameData,
+                updatedAt: new Date(),
+            });
 
-    return {
-      reviews: sanitizedReviews,
-      averageRating,
-      totalReviews: reviews.length,
-    };
-  }
+            return this.gameRepository.findById(id);
+        }
+
+        // Only publishers can update games
+        if (currentUser.accountType !== 'publisher') {
+            throw new HttpErrors.Forbidden('Only publishers and admins can update games');
+        }
+
+        const publisherId = currentUser[securityId];
+        const game = await this.gameRepository.findById(id);
+
+        // Check ownership
+        if (game.publisherId !== publisherId) {
+            throw new HttpErrors.Forbidden('You can only update your own games');
+        }
+
+        // Prevent updating restricted fields
+        delete (gameData as any).id;
+        delete (gameData as any).publisherId;
+
+        await this.gameRepository.updateById(id, {
+            ...gameData,
+            updatedAt: new Date(),
+        });
+
+        return this.gameRepository.findById(id);
+    }
+
+    @del('/games/{id}', {
+        responses: {
+            '204': {
+                description: 'Game DELETE success',
+            },
+        },
+    })
+    @authenticate('jwt')
+    async deleteById(
+        @inject(SecurityBindings.USER) currentUser: UserProfile,
+        @param.path.string('id') id: string,
+    ): Promise<void> {
+        // Admins have full access
+        if (currentUser.accountType === 'admin') {
+            await this.gameRepository.updateById(id, {
+                releaseStatus: 'Delisted',
+                updatedAt: new Date(),
+            });
+            return;
+        }
+
+        // Only publishers can delete games
+        if (currentUser.accountType !== 'publisher') {
+            throw new HttpErrors.Forbidden('Only publishers and admins can delete games');
+        }
+
+        const publisherId = currentUser[securityId];
+        const game = await this.gameRepository.findById(id);
+
+        // Check ownership
+        if (game.publisherId !== publisherId) {
+            throw new HttpErrors.Forbidden('You can only delete your own games');
+        }
+
+        // Soft delete by setting status to Delisted
+        await this.gameRepository.updateById(id, {
+            releaseStatus: 'Delisted',
+            updatedAt: new Date(),
+        });
+    }
+
+    @get('/games/{id}/reviews', {
+        responses: {
+            '200': {
+                description: 'Array of Review model instances for a game',
+                content: {
+                    'application/json': {
+                        schema: { type: 'object' },
+                    },
+                },
+            },
+        },
+    })
+    async getReviews(@param.path.string('id') id: string, @param.query.string('sort') sort?: string): Promise<any> {
+        const reviews = await this.reviewRepository.find({
+            where: { gameId: id },
+            include: [{ relation: 'customer' }],
+        });
+
+        // Sort reviews
+        if (sort === 'date_desc') {
+            reviews.sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime());
+        } else if (sort === 'date_asc') {
+            reviews.sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime());
+        } else if (sort === 'rating_desc') {
+            reviews.sort((a, b) => b.rating - a.rating);
+        } else if (sort === 'rating_asc') {
+            reviews.sort((a, b) => a.rating - b.rating);
+        }
+
+        const averageRating = await this.reviewRepository.calculateAverageRating(id);
+
+        // Remove password from customer data
+        const sanitizedReviews = reviews.map((review) => {
+            const reviewJson = review.toJSON() as any;
+            if (reviewJson.customer) {
+                delete reviewJson.customer.password;
+            }
+            return reviewJson;
+        });
+
+        return {
+            reviews: sanitizedReviews,
+            averageRating,
+            totalReviews: reviews.length,
+        };
+    }
 }
