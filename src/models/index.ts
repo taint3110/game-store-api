@@ -9,3 +9,4 @@ export * from './order.model';
 export * from './order-detail.model';
 export * from './review.model';
 export * from './promotion.model';
+export * from './refund-request.model';

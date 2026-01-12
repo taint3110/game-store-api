@@ -9,3 +9,4 @@ export * from './order-detail.repository';
 export * from './review.repository';
 export * from './promotion.repository';
 export * from './steam-app.repository';
+export * from './refund-request.repository';

@@ -5,7 +5,12 @@ import {authenticate} from '@loopback/authentication';
 import {SecurityBindings, UserProfile, securityId} from '@loopback/security';
 import {randomBytes} from 'crypto';
 import {CustomerAccount} from '../models';
-import {CustomerAccountRepository, OrderRepository, PromotionRepository} from '../repositories';
+import {
+  CustomerAccountRepository,
+  OrderRepository,
+  PromotionRepository,
+  RefundRequestRepository,
+} from '../repositories';
 import {PasswordService} from '../services';
 
 export class CustomerAccountController {
@@ -16,6 +21,8 @@ export class CustomerAccountController {
     public orderRepository: OrderRepository,
     @repository(PromotionRepository)
     public promotionRepository: PromotionRepository,
+    @repository(RefundRequestRepository)
+    public refundRequestRepository: RefundRequestRepository,
     @inject('services.PasswordService')
     public passwordService: PasswordService,
   ) {}
@@ -72,6 +79,22 @@ export class CustomerAccountController {
     if (exp && now > exp) return false;
     if (end && now > end) return false;
     return true;
+  }
+
+  private static refundWindowDays(): number {
+    const raw = process.env.REFUND_WINDOW_DAYS;
+    const parsed = raw ? Number(raw) : 7;
+    if (!Number.isFinite(parsed) || parsed <= 0) return 7;
+    return Math.floor(parsed);
+  }
+
+  private static isWithinRefundWindow(orderDate: Date): boolean {
+    const days = CustomerAccountController.refundWindowDays();
+    const now = Date.now();
+    const start = orderDate.getTime();
+    if (!Number.isFinite(start)) return false;
+    const ageMs = now - start;
+    return ageMs >= 0 && ageMs <= days * 24 * 60 * 60 * 1000;
   }
 
   private static computePromoDiscountCents(subtotalCents: number, promo: any) {
@@ -742,6 +765,100 @@ export class CustomerAccountController {
     });
 
     return orders;
+  }
+
+  @get('/customers/me/refund-requests', {
+    responses: {
+      '200': {
+        description: 'List refund requests for the current customer',
+        content: {'application/json': {schema: {type: 'array', items: {type: 'object'}}}},
+      },
+    },
+  })
+  @authenticate('jwt')
+  async listMyRefundRequests(
+    @inject(SecurityBindings.USER) currentUser: UserProfile,
+  ): Promise<any[]> {
+    CustomerAccountController.ensureCustomerAccount(currentUser);
+    const customerId = currentUser[securityId];
+
+    return this.refundRequestRepository.find({
+      where: {customerId},
+      include: [{relation: 'order'}],
+      order: ['requestedAt DESC'],
+    });
+  }
+
+  @post('/customers/me/orders/{id}/refund-requests', {
+    responses: {
+      '201': {
+        description: 'Create a refund request for an order',
+        content: {'application/json': {schema: {type: 'object'}}},
+      },
+    },
+  })
+  @authenticate('jwt')
+  async createRefundRequest(
+    @inject(SecurityBindings.USER) currentUser: UserProfile,
+    @param.path.string('id') orderId: string,
+    @requestBody({
+      content: {
+        'application/json': {
+          schema: {
+            type: 'object',
+            properties: {
+              reason: {type: 'string', maxLength: 500},
+            },
+          },
+        },
+      },
+    })
+    body: {reason?: string},
+  ): Promise<any> {
+    CustomerAccountController.ensureCustomerAccount(currentUser);
+    const customerId = currentUser[securityId];
+
+    const order = await this.orderRepository.findById(orderId);
+    if (!order || String(order.customerId) !== String(customerId)) {
+      throw new HttpErrors.NotFound('Order not found');
+    }
+
+    if (String(order.paymentStatus) === 'Refunded') {
+      throw new HttpErrors.UnprocessableEntity('This order has already been refunded');
+    }
+
+    if (String(order.paymentStatus) !== 'Completed') {
+      throw new HttpErrors.UnprocessableEntity('Only completed orders can be refunded');
+    }
+
+    const orderDate = order.orderDate ? new Date(order.orderDate) : null;
+    if (!orderDate || Number.isNaN(orderDate.getTime())) {
+      throw new HttpErrors.UnprocessableEntity('Order date is invalid');
+    }
+
+    if (!CustomerAccountController.isWithinRefundWindow(orderDate)) {
+      throw new HttpErrors.UnprocessableEntity(
+        `Refund window expired. Refunds are allowed within ${CustomerAccountController.refundWindowDays()} days of purchase.`,
+      );
+    }
+
+    const existing = await this.refundRequestRepository.find({
+      where: {orderId, customerId, status: 'Pending'},
+      limit: 1,
+    });
+    if (existing.length > 0) {
+      throw new HttpErrors.Conflict('A refund request is already pending for this order');
+    }
+
+    const reason = CustomerAccountController.safeString(body?.reason);
+
+    return this.refundRequestRepository.create({
+      orderId,
+      customerId,
+      status: 'Pending',
+      reason: reason || undefined,
+      requestedAt: new Date(),
+    } as any);
   }
 
   @post('/customers/me/orders', {
