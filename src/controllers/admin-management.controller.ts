@@ -2,7 +2,7 @@ import {inject} from '@loopback/core';
 import {repository} from '@loopback/repository';
 import {get, patch, del, param, post, requestBody, HttpErrors} from '@loopback/rest';
 import {authenticate} from '@loopback/authentication';
-import {SecurityBindings, UserProfile} from '@loopback/security';
+import {SecurityBindings, UserProfile, securityId} from '@loopback/security';
 import {
   CustomerAccountRepository,
   PublisherAccountRepository,
@@ -10,6 +10,7 @@ import {
   GameRepository,
   ReviewRepository,
   AdminAccountRepository,
+  RefundRequestRepository,
 } from '../repositories';
 import {PasswordService} from '../services';
 
@@ -23,6 +24,8 @@ export class AdminManagementController {
     public adminAccountRepository: AdminAccountRepository,
     @repository(OrderRepository)
     public orderRepository: OrderRepository,
+    @repository(RefundRequestRepository)
+    public refundRequestRepository: RefundRequestRepository,
     @repository(GameRepository)
     public gameRepository: GameRepository,
     @repository(ReviewRepository)
@@ -35,6 +38,56 @@ export class AdminManagementController {
     if ((currentUser as any)?.accountType !== 'admin') {
       throw new HttpErrors.Forbidden('Admin access required');
     }
+  }
+
+  private async refundOrderIfNeeded(orderId: string, adminId: string): Promise<any> {
+    const order = await this.orderRepository.findById(orderId);
+
+    if (String(order.paymentStatus) === 'Refunded') {
+      return order;
+    }
+
+    if (String(order.paymentStatus) !== 'Completed') {
+      throw new HttpErrors.UnprocessableEntity('Only completed orders can be refunded');
+    }
+
+    const refundAmount = typeof order.totalValue === 'number' && Number.isFinite(order.totalValue) ? order.totalValue : 0;
+    if (refundAmount < 0) {
+      throw new HttpErrors.UnprocessableEntity('Invalid refund amount');
+    }
+
+    const customer = await this.customerAccountRepository.findById(order.customerId);
+    const currentBalance =
+      typeof (customer as any).accountBalance === 'number' && Number.isFinite((customer as any).accountBalance)
+        ? (customer as any).accountBalance
+        : 0;
+
+    await this.customerAccountRepository.updateById(order.customerId, {
+      accountBalance: currentBalance + refundAmount,
+      updatedAt: new Date(),
+    } as any);
+
+    await this.orderRepository.updateById(orderId, {
+      paymentStatus: 'Refunded',
+      updatedAt: new Date(),
+    } as any);
+
+    const pending = await this.refundRequestRepository.find({
+      where: {orderId, status: 'Pending'},
+    });
+
+    const resolvedAt = new Date();
+    await Promise.all(
+      pending.map(req =>
+        this.refundRequestRepository.updateById(req.id!, {
+          status: 'Approved',
+          resolvedAt,
+          processedByAdminId: adminId,
+        } as any),
+      ),
+    );
+
+    return this.orderRepository.findById(orderId);
   }
 
   // Admin creates a publisher account
@@ -320,6 +373,28 @@ export class AdminManagementController {
     return publisherJson;
   }
 
+  @get('/admin/publishers/{id}/games', {
+    responses: {
+      '200': {
+        description: 'List all games for a publisher (admin only)',
+      },
+    },
+  })
+  @authenticate('jwt')
+  async listPublisherGames(
+    @inject(SecurityBindings.USER) currentUser: UserProfile,
+    @param.path.string('id') id: string,
+  ) {
+    if (currentUser.accountType !== 'admin') {
+      throw new HttpErrors.Forbidden('Admin access required');
+    }
+
+    return this.gameRepository.find({
+      where: {publisherId: id},
+      order: ['updatedAt DESC'],
+    });
+  }
+
   @patch('/admin/publishers/{id}', {
     responses: {
       '200': {
@@ -434,6 +509,185 @@ export class AdminManagementController {
           },
         },
       ],
+    });
+  }
+
+  @patch('/admin/orders/{id}', {
+    responses: {
+      '200': {
+        description: 'Update order payment status',
+      },
+    },
+  })
+  @authenticate('jwt')
+  async updateOrderStatus(
+    @inject(SecurityBindings.USER) currentUser: UserProfile,
+    @param.path.string('id') id: string,
+    @requestBody({
+      content: {
+        'application/json': {
+          schema: {
+            type: 'object',
+            required: ['paymentStatus'],
+            properties: {
+              paymentStatus: {
+                type: 'string',
+                enum: ['Pending', 'Completed', 'Failed', 'Refunded'],
+              },
+            },
+          },
+        },
+      },
+    })
+    body: {paymentStatus: string},
+  ): Promise<any> {
+    AdminManagementController.ensureAdmin(currentUser);
+
+    const paymentStatus = String(body?.paymentStatus ?? '').trim();
+    const allowed = new Set(['Pending', 'Completed', 'Failed', 'Refunded']);
+    if (!allowed.has(paymentStatus)) {
+      throw new HttpErrors.UnprocessableEntity('Invalid paymentStatus');
+    }
+
+    const existing = await this.orderRepository.findById(id);
+    if (String(existing.paymentStatus) === 'Refunded' && paymentStatus !== 'Refunded') {
+      throw new HttpErrors.UnprocessableEntity('Refunded orders cannot change status');
+    }
+
+    if (paymentStatus === 'Refunded') {
+      const adminId = (currentUser as any)?.id || (currentUser as any)?.[securityId];
+      await this.refundOrderIfNeeded(id, String(adminId || ''));
+    } else {
+      await this.orderRepository.updateById(id, {
+        paymentStatus,
+        updatedAt: new Date(),
+      });
+    }
+
+    return this.orderRepository.findById(id, {
+      include: [
+        {relation: 'customer'},
+        {
+          relation: 'orderDetails',
+          scope: {
+            include: [{relation: 'game'}, {relation: 'gameKey'}],
+          },
+        },
+      ],
+    });
+  }
+
+  @get('/admin/refund-requests', {
+    responses: {
+      '200': {
+        description: 'List refund requests',
+        content: {'application/json': {schema: {type: 'array', items: {type: 'object'}}}},
+      },
+    },
+  })
+  @authenticate('jwt')
+  async listRefundRequests(
+    @inject(SecurityBindings.USER) currentUser: UserProfile,
+    @param.query.string('status') status?: string,
+  ): Promise<any[]> {
+    AdminManagementController.ensureAdmin(currentUser);
+
+    const where: any = {};
+    if (status) where.status = String(status).trim();
+
+    return this.refundRequestRepository.find({
+      where: Object.keys(where).length ? where : undefined,
+      include: [{relation: 'order'}, {relation: 'customer'}],
+      order: ['requestedAt DESC'],
+    });
+  }
+
+  @post('/admin/refund-requests/{id}/approve', {
+    responses: {
+      '200': {description: 'Approve a refund request', content: {'application/json': {schema: {type: 'object'}}}},
+    },
+  })
+  @authenticate('jwt')
+  async approveRefundRequest(
+    @inject(SecurityBindings.USER) currentUser: UserProfile,
+    @param.path.string('id') id: string,
+    @requestBody({
+      content: {
+        'application/json': {
+          schema: {
+            type: 'object',
+            properties: {
+              note: {type: 'string', maxLength: 500},
+            },
+          },
+        },
+      },
+    })
+    body: {note?: string},
+  ): Promise<any> {
+    AdminManagementController.ensureAdmin(currentUser);
+    const adminId = (currentUser as any)?.id || (currentUser as any)?.[securityId];
+
+    const req = await this.refundRequestRepository.findById(id);
+    if (String(req.status) !== 'Pending') {
+      throw new HttpErrors.Conflict('Refund request is not pending');
+    }
+
+    await this.refundOrderIfNeeded(req.orderId, String(adminId || ''));
+
+    await this.refundRequestRepository.updateById(id, {
+      status: 'Approved',
+      resolvedAt: new Date(),
+      processedByAdminId: String(adminId || ''),
+      resolutionNote: body?.note ? String(body.note).trim().slice(0, 500) : undefined,
+    } as any);
+
+    return this.refundRequestRepository.findById(id, {
+      include: [{relation: 'order'}, {relation: 'customer'}],
+    });
+  }
+
+  @post('/admin/refund-requests/{id}/reject', {
+    responses: {
+      '200': {description: 'Reject a refund request', content: {'application/json': {schema: {type: 'object'}}}},
+    },
+  })
+  @authenticate('jwt')
+  async rejectRefundRequest(
+    @inject(SecurityBindings.USER) currentUser: UserProfile,
+    @param.path.string('id') id: string,
+    @requestBody({
+      content: {
+        'application/json': {
+          schema: {
+            type: 'object',
+            properties: {
+              note: {type: 'string', maxLength: 500},
+            },
+            required: ['note'],
+          },
+        },
+      },
+    })
+    body: {note: string},
+  ): Promise<any> {
+    AdminManagementController.ensureAdmin(currentUser);
+    const adminId = (currentUser as any)?.id || (currentUser as any)?.[securityId];
+
+    const req = await this.refundRequestRepository.findById(id);
+    if (String(req.status) !== 'Pending') {
+      throw new HttpErrors.Conflict('Refund request is not pending');
+    }
+
+    await this.refundRequestRepository.updateById(id, {
+      status: 'Rejected',
+      resolvedAt: new Date(),
+      processedByAdminId: String(adminId || ''),
+      resolutionNote: String(body.note).trim().slice(0, 500),
+    } as any);
+
+    return this.refundRequestRepository.findById(id, {
+      include: [{relation: 'order'}, {relation: 'customer'}],
     });
   }
 

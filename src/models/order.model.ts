@@ -72,6 +72,49 @@ export class Order extends Entity {
   })
   updatedAt: Date;
 
+  @property({
+    type: 'string',
+  })
+  promoCode?: string;
+
+  @property({
+    type: 'number',
+    jsonSchema: {minimum: 0},
+  })
+  promoDiscountValue?: number;
+
+  @hasMany(() => OrderDetail)
+  orderDetails?: OrderDetail[];
+
+  @property({
+    type: 'array',
+    itemType: 'object',
+    jsonSchema: {
+      items: {
+        type: 'object',
+        required: ['name', 'quantity', 'unitPriceCents', 'keyCodes'],
+        properties: {
+          steamAppId: {type: 'number', minimum: 0},
+          slug: {type: 'string'},
+          name: {type: 'string'},
+          quantity: {type: 'number', minimum: 1, maximum: 99},
+          unitPriceCents: {type: 'number', minimum: 0},
+          image: {type: 'string'},
+          keyCodes: {type: 'array', items: {type: 'string'}},
+        },
+      },
+    },
+  })
+  items?: Array<{
+    steamAppId?: number;
+    slug?: string;
+    name: string;
+    quantity: number;
+    unitPriceCents: number;
+    image?: string;
+    keyCodes: string[];
+  }>;
+
   constructor(data?: Partial<Order>) {
     super(data);
   }
@@ -79,6 +122,7 @@ export class Order extends Entity {
 
 export interface OrderRelations {
   customer?: CustomerAccount;
+  orderDetails?: OrderDetail[];
 }
 
 export type OrderWithRelations = Order & OrderRelations;

@@ -85,6 +85,21 @@ export class Promotion extends Entity {
   publisherId: string;
 
   @property({
+    type: 'string',
+    default: 'Publisher',
+    jsonSchema: {
+      enum: ['Publisher', 'Store'],
+    },
+  })
+  scope?: string;
+
+  @property({
+    type: 'array',
+    itemType: 'string',
+  })
+  gameIds?: string[];
+
+  @property({
     type: 'date',
     default: () => new Date(),
   })
