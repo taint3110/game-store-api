@@ -1,14 +1,17 @@
-import {inject} from '@loopback/core';
 import {repository} from '@loopback/repository';
 import {authenticate} from '@loopback/authentication';
+import {inject} from '@loopback/core';
 import {SecurityBindings, UserProfile, securityId} from '@loopback/security';
 import {get, post, patch, param, requestBody, HttpErrors} from '@loopback/rest';
 import {
   GameRepository,
   GameKeyRepository,
   OrderDetailRepository,
+  OrderRepository,
+  ReviewRepository,
 } from '../repositories';
 import {GameKey} from '../models';
+import {generateKeyCode} from '../utils/key-code';
 
 type PricingPayload = {originalPrice?: number; discountPrice?: number};
 type KeyBatchPayload = {quantity: number; gameVersion?: string};
@@ -21,6 +24,10 @@ export class PublisherGameController {
     public gameKeyRepository: GameKeyRepository,
     @repository(OrderDetailRepository)
     public orderDetailRepository: OrderDetailRepository,
+    @repository(OrderRepository)
+    public orderRepository: OrderRepository,
+    @repository(ReviewRepository)
+    public reviewRepository: ReviewRepository,
   ) {}
 
   private isAdmin(user: UserProfile) {
@@ -37,6 +44,110 @@ export class PublisherGameController {
     if (game.publisherId !== this.getPublisherId(user)) {
       throw new HttpErrors.Forbidden('You can only manage your own games.');
     }
+  }
+
+  @get('/publisher/games/{id}/reviews', {
+    responses: {
+      '200': {
+        description: 'List reviews for a publisher-owned game',
+      },
+    },
+  })
+  @authenticate('jwt')
+  async listGameReviews(
+    @inject(SecurityBindings.USER) currentUser: UserProfile,
+    @param.path.string('id') id: string,
+  ): Promise<any> {
+    if (!this.isAdmin(currentUser) && (currentUser as any)?.accountType !== 'publisher') {
+      throw new HttpErrors.Forbidden('Only publishers and admins can view reviews here.');
+    }
+    await this.ensureOwnsGame(currentUser, id);
+
+    const reviews = await this.reviewRepository.find({
+      where: {gameId: id},
+      include: [{relation: 'customer'}],
+      order: ['updatedAt DESC'],
+    });
+
+    const sanitized = reviews.map(r => {
+      const anyReview = r as any;
+      if (anyReview?.customer && typeof anyReview.customer === 'object') {
+        return {
+          ...anyReview,
+          customer: {...anyReview.customer, password: ''},
+        };
+      }
+      return anyReview;
+    });
+
+    const totalReviews = sanitized.length;
+    const averageRating =
+      totalReviews === 0
+        ? 0
+        : sanitized.reduce((sum: number, r: any) => sum + (Number(r.rating) || 0), 0) /
+          totalReviews;
+
+    return {
+      reviews: sanitized,
+      averageRating: Math.round(averageRating * 10) / 10,
+      totalReviews,
+    };
+  }
+
+  @get('/publisher/reviews', {
+    responses: {
+      '200': {
+        description: 'List reviews across publisher-owned games',
+      },
+    },
+  })
+  @authenticate('jwt')
+  async listMyReviews(
+    @inject(SecurityBindings.USER) currentUser: UserProfile,
+    @param.query.string('gameId') gameId?: string,
+    @param.query.number('limit') limit?: number,
+    @param.query.number('skip') skip?: number,
+  ): Promise<any[]> {
+    if (!this.isAdmin(currentUser) && (currentUser as any)?.accountType !== 'publisher') {
+      throw new HttpErrors.Forbidden('Only publishers and admins can view reviews here.');
+    }
+
+    const take = Math.min(200, Math.max(1, Math.floor(Number(limit) || 50)));
+    const offset = Math.max(0, Math.floor(Number(skip) || 0));
+
+    let where: any = {};
+    if (!this.isAdmin(currentUser)) {
+      const myGames = await this.gameRepository.find({
+        where: {publisherId: this.getPublisherId(currentUser)},
+        fields: {id: true},
+        limit: 1000,
+      });
+      const ids = myGames.map(g => String((g as any).id));
+      where.gameId = {inq: ids};
+    }
+
+    if (gameId) {
+      where = {...where, gameId: String(gameId)};
+    }
+
+    const reviews = await this.reviewRepository.find({
+      where,
+      include: [{relation: 'customer'}, {relation: 'game'}],
+      order: ['updatedAt DESC'],
+      limit: take,
+      skip: offset,
+    });
+
+    return reviews.map(r => {
+      const anyReview = r as any;
+      if (anyReview?.customer && typeof anyReview.customer === 'object') {
+        return {
+          ...anyReview,
+          customer: {...anyReview.customer, password: ''},
+        };
+      }
+      return anyReview;
+    });
   }
 
   @get('/publisher/games/me', {
@@ -132,6 +243,7 @@ export class PublisherGameController {
     const keys: Partial<GameKey>[] = Array.from({length: quantity}).map(() => ({
       gameId: id,
       gameVersion: version,
+      keyCode: generateKeyCode(),
       businessStatus: 'Available',
       activationStatus: 'NotActivated',
       publishRegistrationDate: new Date(),
@@ -207,10 +319,44 @@ export class PublisherGameController {
 
     const orderDetails = await this.orderDetailRepository.find({
       where: {gameId: id},
-      fields: {value: true},
+      fields: {value: true, orderId: true},
     });
-    const totalRevenue = orderDetails.reduce((sum, od) => sum + (od.value || 0), 0);
-    const totalSales = orderDetails.length;
+
+    const orderIdsWithDetails = new Set(
+      orderDetails.map((od: any) => String(od?.orderId ?? '')).filter(Boolean),
+    );
+
+    const totalRevenueFromDetails = orderDetails.reduce((sum, od: any) => sum + (od?.value || 0), 0);
+    const totalSalesFromDetails = orderDetails.length;
+
+    // Fallback for newer order flow (orders.items[]) when orderDetails are not created.
+    const orders = await this.orderRepository.find({
+      where: {paymentStatus: 'Completed'} as any,
+      fields: {id: true, items: true},
+      limit: 2000,
+    });
+
+    let totalRevenueFromItems = 0;
+    let totalSalesFromItems = 0;
+    for (const o of orders as any[]) {
+      const orderId = String(o?.id ?? '');
+      if (!orderId || orderIdsWithDetails.has(orderId)) continue;
+      const items = Array.isArray(o?.items) ? o.items : [];
+      for (const line of items as any[]) {
+        const slug = String(line?.slug ?? '').trim();
+        if (!slug || slug !== String(id)) continue;
+        const qty = typeof line?.quantity === 'number' ? Math.max(1, Math.floor(line.quantity)) : 1;
+        const unitCents =
+          typeof line?.unitPriceCents === 'number' && Number.isFinite(line.unitPriceCents)
+            ? Math.max(0, Math.floor(line.unitPriceCents))
+            : 0;
+        totalSalesFromItems += qty;
+        totalRevenueFromItems += (unitCents * qty) / 100;
+      }
+    }
+
+    const totalRevenue = totalRevenueFromDetails > 0 ? totalRevenueFromDetails : totalRevenueFromItems;
+    const totalSales = totalSalesFromDetails > 0 ? totalSalesFromDetails : totalSalesFromItems;
 
     return {
       keys: {
@@ -226,4 +372,3 @@ export class PublisherGameController {
     };
   }
 }
-

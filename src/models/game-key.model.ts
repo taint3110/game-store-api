@@ -25,6 +25,11 @@ export class GameKey extends Entity {
   })
   gameVersion: string;
 
+  @property({
+    type: 'string',
+  })
+  keyCode?: string;
+
   @belongsTo(() => CustomerAccount, {name: 'owner'})
   ownedByCustomerId?: string;
 

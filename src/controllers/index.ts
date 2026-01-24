@@ -7,3 +7,8 @@ export * from './admin-account.controller';
 export * from './admin-management.controller';
 export * from './promotion.controller';
 export * from './publisher-game.controller';
+export * from './publisher-dashboard.controller';
+export * from './publisher-account.controller';
+export * from './statistics.controller';
+export * from './dev-seed.controller';
+export * from './report.controller';

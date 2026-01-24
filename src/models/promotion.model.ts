@@ -24,6 +24,12 @@ export class Promotion extends Entity {
   @property({
     type: 'string',
     required: true,
+  })
+  code: string;
+
+  @property({
+    type: 'string',
+    required: true,
     jsonSchema: {
       enum: ['Percentage', 'FixedAmount'],
     },
@@ -83,6 +89,21 @@ export class Promotion extends Entity {
 
   @belongsTo(() => PublisherAccount)
   publisherId: string;
+
+  @property({
+    type: 'string',
+    default: 'Publisher',
+    jsonSchema: {
+      enum: ['Publisher', 'Store'],
+    },
+  })
+  scope?: string;
+
+  @property({
+    type: 'array',
+    itemType: 'string',
+  })
+  gameIds?: string[];
 
   @property({
     type: 'date',

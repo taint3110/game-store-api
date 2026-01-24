@@ -1,50 +1,45 @@
-import { inject } from '@loopback/core';
+import {inject} from '@loopback/core';
+import {InvokeMiddleware} from '@loopback/express';
 import {
-    FindRoute,
-    InvokeMethod,
-    ParseParams,
-    Reject,
-    RequestContext,
-    RestBindings,
-    Send,
-    SequenceHandler,
+  FindRoute,
+  InvokeMethod,
+  ParseParams,
+  Reject,
+  RequestContext,
+  RestBindings,
+  Send,
+  SequenceHandler,
 } from '@loopback/rest';
-import { AuthenticationBindings, AuthenticateFn } from '@loopback/authentication';
+import {AuthenticationBindings, AuthenticateFn} from '@loopback/authentication';
 
 export class MySequence implements SequenceHandler {
-    constructor(
-        @inject(RestBindings.SequenceActions.FIND_ROUTE) protected findRoute: FindRoute,
-        @inject(RestBindings.SequenceActions.PARSE_PARAMS) protected parseParams: ParseParams,
-        @inject(RestBindings.SequenceActions.INVOKE_METHOD) protected invoke: InvokeMethod,
-        @inject(RestBindings.SequenceActions.SEND) public send: Send,
-        @inject(RestBindings.SequenceActions.REJECT) public reject: Reject,
-        @inject(AuthenticationBindings.AUTH_ACTION) protected authenticateRequest: AuthenticateFn,
-    ) {}
+  constructor(
+    @inject(RestBindings.SequenceActions.FIND_ROUTE) protected findRoute: FindRoute,
+    @inject(RestBindings.SequenceActions.PARSE_PARAMS) protected parseParams: ParseParams,
+    @inject(RestBindings.SequenceActions.INVOKE_METHOD) protected invoke: InvokeMethod,
+    @inject(RestBindings.SequenceActions.INVOKE_MIDDLEWARE, {optional: true})
+    protected invokeMiddleware: InvokeMiddleware = async () => false,
+    @inject(RestBindings.SequenceActions.SEND) public send: Send,
+    @inject(RestBindings.SequenceActions.REJECT) public reject: Reject,
+    @inject(AuthenticationBindings.AUTH_ACTION) protected authenticateRequest: AuthenticateFn,
+  ) {}
 
-    async handle(context: RequestContext) {
-        try {
-            const { request, response } = context;
+  async handle(context: RequestContext) {
+    try {
+      const {request, response} = context;
 
-            // ✅ Thêm CORS headers CHO TẤT CẢ requests (bao gồm cả OPTIONS)
-            response.setHeader('Access-Control-Allow-Origin', '*');
-            response.setHeader('Access-Control-Allow-Methods', 'GET,HEAD,PUT,PATCH,POST,DELETE,OPTIONS');
-            response.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
-            response.setHeader('Access-Control-Max-Age', '86400'); // Cache preflight 24h
+      const finished = await this.invokeMiddleware(context);
+      if (finished) return;
 
-            // ✅ Xử lý preflight OPTIONS request
-            if (request.method === 'OPTIONS') {
-                response.status(204).end();
-                return;
-            }
+      const route = this.findRoute(request);
 
-            const route = this.findRoute(request);
-            await this.authenticateRequest(request);
-            const args = await this.parseParams(request, route);
-            const result = await this.invoke(route, args);
+      await this.authenticateRequest(request);
 
-            this.send(response, result);
-        } catch (err) {
-            this.reject(context, err);
-        }
+      const args = await this.parseParams(request, route);
+      const result = await this.invoke(route, args);
+      this.send(response, result);
+    } catch (err) {
+      this.reject(context, err);
     }
+  }
 }
